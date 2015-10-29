@@ -19,6 +19,14 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs
             return (IBlobArgumentBindingProvider)Activator.CreateInstance(bindingProviderType);
         }
 
+        public static IBlobContainerArgumentBindingProvider CreateContainerReadBindingProvider(Type binderType)
+        {
+            VerifyDefaultConstructor(binderType);
+            Type valueType = GetBindingValueType(binderType);
+            Type bindingProviderType = typeof(CloudBlobEnumerableArgumentBindingProvider<,>).MakeGenericType(valueType, binderType);
+            return (IBlobContainerArgumentBindingProvider)Activator.CreateInstance(bindingProviderType);
+        }
+
         public static IBlobArgumentBindingProvider CreateWriteBindingProvider(Type binderType,
             IContextGetter<IBlobWrittenWatcher> blobWrittenWatcherGetter)
         {

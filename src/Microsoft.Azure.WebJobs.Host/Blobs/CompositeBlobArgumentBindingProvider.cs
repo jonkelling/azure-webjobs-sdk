@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 
@@ -21,6 +22,8 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs
             foreach (IBlobArgumentBindingProvider provider in _providers)
             {
                 IBlobArgumentBinding binding = provider.TryCreate(parameter, access);
+
+                Trace.TraceInformation("TryCreate BlobArgumentBindingProvider Type '{0}' - Result = {1}.", provider.GetType().Name, binding == null ? "null" : "not null");
 
                 if (binding != null)
                 {

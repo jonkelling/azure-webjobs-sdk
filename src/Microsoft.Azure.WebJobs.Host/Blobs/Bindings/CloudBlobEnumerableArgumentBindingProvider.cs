@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs.Host.Bindings;
 using Microsoft.Azure.WebJobs.Host.Blobs.Bindings;
 using Microsoft.Azure.WebJobs.Host.Blobs.Listeners;
+using Microsoft.Azure.WebJobs.Host.Protocols;
 using Microsoft.Azure.WebJobs.Host.Storage.Blob;
 using Microsoft.WindowsAzure.Storage.Blob;
 
@@ -137,4 +138,133 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Bindings
             }
         }
     }
+
+
+
+
+    internal class CloudBlobEnumerableArgumentBindingProvider<TValue, TBinder> : IBlobContainerArgumentBindingProvider
+        where TBinder : ICloudBlobStreamBinder<TValue>, new()
+    {
+        public IArgumentBinding<IStorageBlobContainer> TryCreate(ParameterInfo parameter)
+        {
+            if (parameter.ParameterType == typeof(IEnumerable<TValue>))
+            {
+                return new CloudBlobEnumerableArgumentBinding(parameter);
+            }
+
+            return null;
+        }
+
+        private class CloudBlobEnumerableArgumentBinding : IArgumentBinding<IStorageBlobContainer>
+        {
+            private readonly ParameterInfo _parameter;
+            private readonly ICloudBlobStreamBinder<TValue> _objectBinder = new TBinder();
+
+            public CloudBlobEnumerableArgumentBinding(ParameterInfo parameter)
+            {
+                _parameter = parameter;
+            }
+
+            public Type ValueType
+            {
+                get { return typeof(IEnumerable<CloudBlockBlob>); }
+            }
+
+            public async Task<IValueProvider> BindAsync(IStorageBlobContainer container, ValueBindingContext context)
+            {
+                BlobValueBindingContext containerBindingContext = (BlobValueBindingContext)context;
+
+                // Query the blob container using the blob prefix (if specified)
+                // Note that we're explicitly using useFlatBlobListing=true to collapse
+                // sub directories. If users want to bind to a sub directory, they can
+                // bind to CloudBlobDirectory.
+                string prefix = containerBindingContext.Path.BlobName;
+                IEnumerable<IStorageListBlobItem> blobItems = await container.ListBlobsAsync(prefix, true, context.CancellationToken);
+
+                // create an IEnumerable<T> of the correct type, performing any
+                // required conversions on the blobs
+                Type elementType = _parameter.ParameterType.GenericTypeArguments[0];
+                IList list = await ConvertBlobs(elementType, blobItems, context);
+
+                string invokeString = containerBindingContext.Path.ToString();
+                return new ValueProvider(list, _parameter.ParameterType, invokeString);
+            }
+
+            private async Task<IList> ConvertBlobs(Type targetType, IEnumerable<IStorageListBlobItem> blobItems, ValueBindingContext context)
+            {
+                Type listType = typeof(List<>).MakeGenericType(targetType);
+                IList list = (IList)Activator.CreateInstance(listType);
+                foreach (var blobItem in blobItems)
+                {
+                    object converted = await ConvertBlob(targetType, ((IStorageBlob)blobItem), context);
+                    list.Add(converted);
+                }
+
+                return list;
+            }
+
+            private async Task<object> ConvertBlob(Type targetType, IStorageBlob blob, ValueBindingContext context)
+            {
+                object converted = null;
+
+                if (targetType == typeof(TValue))
+                {
+
+                    TValue value;
+
+                    WatchableReadStream watchableStream = await ReadBlobArgumentBinding.TryBindStreamAsync(blob, context);
+                    if (watchableStream == null)
+                    {
+                        value = await _objectBinder.ReadFromStreamAsync(watchableStream, context.CancellationToken);
+                        return BlobValueProvider.Create(blob, value).GetValue();
+                    }
+
+                    ParameterLog status;
+
+                    using (watchableStream)
+                    {
+                        value = await _objectBinder.ReadFromStreamAsync(watchableStream, context.CancellationToken);
+                        status = watchableStream.GetStatus();
+                    }
+
+                    return BlobWatchableValueProvider.Create(blob, value, new ImmutableWatcher(status)).GetValue();
+                }
+
+                return converted;
+            }
+
+            private class ValueProvider : IValueProvider
+            {
+                private readonly object _value;
+                private readonly Type _type;
+                private readonly string _invokeString;
+
+                public ValueProvider(object value, Type type, string invokeString)
+                {
+                    _value = value;
+                    _type = type;
+                    _invokeString = invokeString;
+                }
+
+                public Type Type
+                {
+                    get
+                    {
+                        return _type;
+                    }
+                }
+
+                public object GetValue()
+                {
+                    return _value;
+                }
+
+                public string ToInvokeString()
+                {
+                    return _invokeString;
+                }
+            }
+        }
+    }
+
 }

@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -45,7 +46,7 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Bindings
             _nameResolver = nameResolver;
             _accountProvider = accountProvider;
             _blobArgumentProvider = CreateBlobArgumentProvider(extensionTypeLocator.GetCloudBlobStreamBinderTypes(), blobWrittenWatcherGetter);
-            _blobContainerArgumentProvider = CreateBlobContainerArgumentProvider();
+            _blobContainerArgumentProvider = CreateBlobContainerArgumentProvider(extensionTypeLocator.GetCloudBlobStreamBinderTypes());
         }
 
         public async Task<IBinding> TryCreateAsync(BindingProviderContext context)
@@ -68,6 +69,7 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Bindings
             IStorageBlobClient client = account.CreateBlobClient(clientFactoryContext);
 
             // first try to bind to the Container
+            Trace.TraceInformation("_blobContainerArgumentProvider Type: '" + _blobContainerArgumentProvider.GetType().Name + "'.");
             IArgumentBinding<IStorageBlobContainer> containerArgumentBinding = _blobContainerArgumentProvider.TryCreate(parameter);
             if (containerArgumentBinding == null)
             {
@@ -75,7 +77,7 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Bindings
                 IBlobArgumentBinding blobArgumentBinding = _blobArgumentProvider.TryCreate(parameter, blobAttribute.Access);
                 if (blobArgumentBinding == null)
                 {
-                    throw new InvalidOperationException("Can't bind Blob to type '" + parameter.ParameterType + "'.");
+                    throw new InvalidOperationException("Can't bind Blob to type '" + parameter.ParameterType + "' (BlobArgumentProvider Type '" + _blobArgumentProvider.GetType().Name + "').");
                 }
 
                 path = BindableBlobPath.Create(resolvedPath);
@@ -128,13 +130,19 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Bindings
             return new CompositeBlobArgumentBindingProvider(innerProviders);
         }
 
-        private static IBlobContainerArgumentBindingProvider CreateBlobContainerArgumentProvider()
+        private static IBlobContainerArgumentBindingProvider CreateBlobContainerArgumentProvider(IEnumerable<Type> cloudBlobStreamBinderTypes)
         {
             List<IBlobContainerArgumentBindingProvider> innerProviders = new List<IBlobContainerArgumentBindingProvider>();
 
             innerProviders.Add(new CloudBlobContainerArgumentBindingProvider());
             innerProviders.Add(new CloudBlobDirectoryArgumentBindingProvider());
             innerProviders.Add(new CloudBlobEnumerableArgumentBindingProvider());
+
+            if (cloudBlobStreamBinderTypes != null)
+            {
+                innerProviders.AddRange(cloudBlobStreamBinderTypes.Select(
+                    t => CloudBlobStreamObjectBinder.CreateContainerReadBindingProvider(t)));
+            }
 
             return new CompositeBlobContainerArgumentBindingProvider(innerProviders);
         }
