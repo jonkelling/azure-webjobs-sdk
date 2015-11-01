@@ -6,7 +6,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Reflection;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs.Host.Bindings;
 using Microsoft.Azure.WebJobs.Host.Converters;
@@ -68,10 +71,15 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Bindings
             };
             IStorageBlobClient client = account.CreateBlobClient(clientFactoryContext);
 
+            // trying to fix improper container binding
+
+
             // first try to bind to the Container
             Trace.TraceInformation("_blobContainerArgumentProvider Type: '" + _blobContainerArgumentProvider.GetType().Name + "'.");
             IArgumentBinding<IStorageBlobContainer> containerArgumentBinding = _blobContainerArgumentProvider.TryCreate(parameter);
-            if (containerArgumentBinding == null)
+
+            //BIND_AS_NOT_CONTAINER:
+            if (containerArgumentBinding == null || Regex.IsMatch(resolvedPath, @"\.[^/]+$"))
             {
                 // if this isn't a Container binding, try a Blob binding
                 IBlobArgumentBinding blobArgumentBinding = _blobArgumentProvider.TryCreate(parameter, blobAttribute.Access);
@@ -90,7 +98,36 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Bindings
             path.ValidateContractCompatibility(context.BindingDataContract);
             BlobContainerBinding.ValidateContainerBinding(blobAttribute, parameter.ParameterType, path);
 
-            return new BlobContainerBinding(parameter.Name, containerArgumentBinding, client, path);    
+            /*
+             *** This try/catch checks if a blob exists for the given container + path.
+             *** If the blob does exist, then this should not be a container binding.
+             *** HOWEVER, we only have container and path name PATTERNS, not the actual values.
+             *** As an alternative for now, I'll just check to see if the path name pattern
+             *** ends with a file extension (added to line 82).
+            try
+            {
+                var container = client.GetContainerReference(path.ContainerNamePattern);
+                var blobRef =
+                    await container.GetBlobReferenceFromServerAsync(path.BlobNamePattern, CancellationToken.None);
+                var exists = await blobRef.ExistsAsync(CancellationToken.None);
+                if (exists)
+                {
+                    containerArgumentBinding = null;
+                    goto BIND_AS_NOT_CONTAINER;
+                }
+            }
+            catch (Exception ex)
+            {
+                var webException = ex.InnerException as WebException;
+                if (webException == null)
+                    throw;
+                var httpWebResponse = webException.Response as HttpWebResponse;
+                if (httpWebResponse == null || httpWebResponse.StatusCode != HttpStatusCode.NotFound)
+                    throw;
+            }
+            */
+
+            return new BlobContainerBinding(parameter.Name, containerArgumentBinding, client, path);
         }
 
         private string Resolve(string blobName)
