@@ -12,11 +12,13 @@ namespace Microsoft.Azure.WebJobs.Host.Bindings.Path
     {
         private readonly string _value;
         private readonly bool _isParameter;
+        private readonly int _propertyDepth;
 
-        public BindingTemplateToken(string value, bool isParameter)
+        public BindingTemplateToken(string value, bool isParameter, int propertyDepth)
         {
             _value = value;
             _isParameter = isParameter;
+            _propertyDepth = propertyDepth;
         }
 
         public string Value 
@@ -27,6 +29,11 @@ namespace Microsoft.Azure.WebJobs.Host.Bindings.Path
         public bool IsParameter 
         { 
             get { return _isParameter; } 
+        }
+
+        public int PropertyDepth
+        {
+            get { return _propertyDepth; }
         }
     }
 }

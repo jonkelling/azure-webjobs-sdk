@@ -58,12 +58,17 @@ namespace Microsoft.Azure.WebJobs.Host.Bindings.Path
         private const string DecimalDigitCharacter = @"\p{Nd}";
         private const string CombiningCharacter = @"\p{Mn}|\p{Mc}";
         private const string LetterCharacter = @"\p{Lu}|\p{Ll}|\p{Lt}|\p{Lm}|\p{Lo}|\p{Nl}";
-        private const string IdentifierPartCharacter = 
+        private const string PeriodCharacter = @"\.";
+        private const string IdentifierPartCharacter =
             LetterCharacter + "|" +
             DecimalDigitCharacter + "|" +
             ConnectingCharacter + "|" +
             CombiningCharacter + "|" +
-            FormattingCharacter;
+            FormattingCharacter + "|" +
+            //TODO Improve use of PeriodCharacter in pattern matching.
+            //! I'm going to do a sloppy job of getting the PeriodCharacter in here
+            //! for now, but I need it to work to prove out some stuff.
+            PeriodCharacter;
 
         // Validation regex pattern of C# identifier
         private const string IdentifierPattern = "^(" + LetterCharacter + "|_)" + 
@@ -119,7 +124,7 @@ namespace Microsoft.Azure.WebJobs.Host.Bindings.Path
                     {
                         case "escape":
                             string value = Char.ToString(namedGroup.Value[0]);
-                            yield return new BindingTemplateToken(value, isParameter: false);
+                            yield return new BindingTemplateToken(value, isParameter: false, propertyDepth: 0);
                             break;
                         case "parameter":
                             if (String.IsNullOrEmpty(namedGroup.Value))
@@ -134,10 +139,10 @@ namespace Microsoft.Azure.WebJobs.Host.Bindings.Path
                                     "Invalid template '{0}'. The parameter name '{1}' is invalid.",
                                     input, namedGroup.Value));
                             }
-                            yield return new BindingTemplateToken(namedGroup.Value, isParameter: true);
+                            yield return new BindingTemplateToken(namedGroup.Value, isParameter: true, propertyDepth: namedGroup.Value.Count(c => c == '.'));
                             break;
                         case "literal":
-                            yield return new BindingTemplateToken(namedGroup.Value, isParameter: false);
+                            yield return new BindingTemplateToken(namedGroup.Value, isParameter: false, propertyDepth: 0);
                             break;
                         case "unbalanced":
                             throw new FormatException(String.Format(

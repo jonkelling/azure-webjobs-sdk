@@ -11,6 +11,26 @@ using System.Reflection;
 
 namespace Microsoft.Azure.WebJobs.Host
 {
+    //internal interface IPropertyHelper
+    //{
+    //    /// <summary>
+    //    /// Gets or sets the name of the property.
+    //    /// </summary>
+    //    string Name { get; }
+
+    //    /// <summary>
+    //    /// Gets the <see cref="Type"/> of the property.
+    //    /// </summary>
+    //    Type PropertyType { get; }
+
+    //    /// <summary>
+    //    /// Gets the value of the property for the specified instance.
+    //    /// </summary>
+    //    /// <param name="instance">The instance to return the property value for.</param>
+    //    /// <returns>The property value.</returns>
+    //    object GetValue(object instance);
+    //}
+
     /// <summary>
     /// Class used to facilitate reflection operations.
     /// </summary>
@@ -24,7 +44,7 @@ namespace Microsoft.Azure.WebJobs.Host
         private static ConcurrentDictionary<Type, PropertyHelper[]> _reflectionCache = new ConcurrentDictionary<Type, PropertyHelper[]>();
 
         private readonly Type _propertyType;
-        private Func<object, object> _valueGetter;
+        protected Func<object, object> _valueGetter;
 
         /// <summary>
         /// Initializes a fast property helper. This constructor does not cache the helper.
@@ -40,6 +60,13 @@ namespace Microsoft.Azure.WebJobs.Host
             Name = property.Name;
             _propertyType = property.PropertyType;
             _valueGetter = MakeFastPropertyGetter(property);
+        }
+
+        protected PropertyHelper(string name, Type propertyType, Func<object, object> valueGetter)
+        {
+            Name = name;
+            _propertyType = propertyType;
+            _valueGetter = valueGetter;
         }
 
         // Implementation of the fast getter.
@@ -92,10 +119,11 @@ namespace Microsoft.Azure.WebJobs.Host
         /// Returns a collection of <see cref="PropertyHelper"/>s for the specified <see cref="Type"/>.
         /// </summary>
         /// <param name="type">The type to return <see cref="PropertyHelper"/>s for.</param>
+        /// <param name="getExtendedPropertyHelpers"></param>
         /// <returns>A collection of <see cref="PropertyHelper"/>s.</returns>
-        public static PropertyHelper[] GetProperties(Type type)
+        public static PropertyHelper[] GetProperties(Type type, bool getExtendedPropertyHelpers = true)
         {
-            return GetProperties(type, CreateInstance, _reflectionCache);
+            return GetProperties(type, CreateInstance, _reflectionCache, getExtendedPropertyHelpers);
         }
 
         /// <summary>
@@ -198,7 +226,8 @@ namespace Microsoft.Azure.WebJobs.Host
 
         private static PropertyHelper[] GetProperties(Type type,
                                                         Func<PropertyInfo, PropertyHelper> createPropertyHelper,
-                                                        ConcurrentDictionary<Type, PropertyHelper[]> cache)
+                                                        ConcurrentDictionary<Type, PropertyHelper[]> cache,
+                                                        bool getExtendedPropertyHelpers)
         {
             // Using an array rather than IEnumerable, as this will be called on the hot path numerous times.
             PropertyHelper[] helpers;
@@ -218,6 +247,30 @@ namespace Microsoft.Azure.WebJobs.Host
                     PropertyHelper propertyHelper = createPropertyHelper(property);
 
                     newHelpers.Add(propertyHelper);
+
+                    if (getExtendedPropertyHelpers)
+                    {
+                        var extendedPropertyHelpers = GetProperties(propertyHelper.PropertyType, false);
+
+                        newHelpers.AddRange(
+                            from extendedPropertyHelper in extendedPropertyHelpers
+                            let extendedPropertyName = propertyHelper.Name + "." + extendedPropertyHelper.Name
+                            let extendedPropertyValueGetter =
+                                (Func<object, object>)
+                                    (o =>
+                                    {
+                                        var containerValue = propertyHelper.GetValue(o);
+                                        if (containerValue == null)
+                                            return null;
+                                        return extendedPropertyHelper.GetValue(containerValue);
+                                    })
+                            select
+                                new ExtendedPropertyHelper(
+                                    extendedPropertyName,
+                                    extendedPropertyHelper.PropertyType,
+                                    extendedPropertyValueGetter)
+                            );
+                    }
                 }
 
                 helpers = newHelpers.ToArray();
@@ -225,6 +278,13 @@ namespace Microsoft.Azure.WebJobs.Host
             }
 
             return helpers;
+        }
+    }
+
+    internal class ExtendedPropertyHelper : PropertyHelper
+    {
+        public ExtendedPropertyHelper(string name, Type type, Func<object, object> valueGetter) : base(name, type, valueGetter)
+        {
         }
     }
 }
