@@ -7,4 +7,4 @@ else
     $ProgramFiles = "$env:ProgramFiles"
 }
 
-& "$ProgramFiles\MSBuild\12.0\Bin\MSBuild.exe" WebJobs.proj $Args
+& "$ProgramFiles\MSBuild\14.0\Bin\MSBuild.exe" WebJobs.proj $Args
