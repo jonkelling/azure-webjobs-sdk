@@ -3,7 +3,7 @@
 
 using System;
 using System.Collections.Concurrent;
-using System.Threading;
+using System.Diagnostics;
 using Microsoft.Azure.WebJobs.Host;
 using Microsoft.Azure.WebJobs.Host.Executors;
 using Microsoft.Azure.WebJobs.Host.Indexers;
@@ -60,12 +60,34 @@ namespace Microsoft.Azure.WebJobs
             // add our built in services here
             IExtensionRegistry extensions = new DefaultExtensionRegistry();
             ITypeLocator typeLocator = new DefaultTypeLocator(ConsoleProvider.Out, extensions);
+            IConverterManager converterManager = new ConverterManager();
+
             AddService<IExtensionRegistry>(extensions);
             AddService<StorageClientFactory>(new StorageClientFactory());
             AddService<INameResolver>(new DefaultNameResolver());
             AddService<IJobActivator>(DefaultJobActivator.Instance);
             AddService<ITypeLocator>(typeLocator);
+            AddService<IConverterManager>(converterManager);
+
+            string value = ConfigurationUtility.GetSettingFromConfigOrEnvironment(Constants.EnvironmentSettingName);
+            IsDevelopment = string.Compare(Constants.DevelopmentEnvironmentValue, value, StringComparison.OrdinalIgnoreCase) == 0;
         }
+
+        /// <summary>
+        /// Gets a value indicating whether the <see cref="JobHost"/> is running in a Development environment.
+        /// You can use this property in conjunction with <see cref="UseDevelopmentSettings"/> to default
+        /// configuration settings to values optimized for local development.
+        /// <Remarks>
+        /// The environment is determined by the value of the "AzureWebJobsEnv" environment variable. When this
+        /// is set to "Development", this property will return true.
+        /// </Remarks>
+        /// </summary>
+        public bool IsDevelopment { get; private set; }
+
+        /// <summary>
+        /// Returns true if <see cref="UseDevelopmentSettings"/> has been called on this instance.
+        /// </summary>
+        internal bool UsingDevelopmentSettings { get; set; }
 
         /// <summary>Gets or sets the host ID.</summary>
         /// <remarks>
@@ -76,8 +98,8 @@ namespace Microsoft.Azure.WebJobs
         /// to the dashboard indicating that an instance of the host running.
         /// </para>
         /// <para>
-        /// If this value is <see langword="null"/>, a host ID will automatically be generated based on the assembly
-        /// name of the first function.
+        /// If this value is <see langword="null"/> on startup, a host ID will automatically be generated based on the assembly
+        /// name of the first function, and that host ID will be made available via this property after the host has fully started.
         /// </para>
         /// <para>
         /// If non-homogeneous host instances share the same first function assembly,
@@ -265,6 +287,19 @@ namespace Microsoft.Azure.WebJobs
                 }
                 AddService<StorageClientFactory>(value);
             }
+        }
+
+        /// <summary>
+        /// Configures various configuration settings on this <see cref="JobHostConfiguration"/> to 
+        /// optimize for local development.
+        /// </summary>
+        public void UseDevelopmentSettings()
+        {
+            Tracing.ConsoleLevel = TraceLevel.Verbose;
+            Queues.MaxPollingInterval = TimeSpan.FromSeconds(2);
+            Singleton.ListenerLockPeriod = TimeSpan.FromSeconds(15);
+
+            UsingDevelopmentSettings = true;
         }
 
         /// <summary>Gets the service object of the specified type.</summary>

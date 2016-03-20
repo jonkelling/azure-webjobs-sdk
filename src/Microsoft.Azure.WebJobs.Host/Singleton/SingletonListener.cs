@@ -28,8 +28,8 @@ namespace Microsoft.Azure.WebJobs.Host.Listeners
             _singletonConfig = _singletonManager.Config;
             _innerListener = innerListener;
 
-            string boundScope = _singletonManager.GetBoundScope(_attribute.Scope);
-            _lockId = SingletonManager.FormatLockId(_method, boundScope);
+            string boundScopeId = _singletonManager.GetBoundScopeId(_attribute.ScopeId);
+            _lockId = singletonManager.FormatLockId(_method, _attribute.Scope, boundScopeId);
             _lockId += ".Listener";
         }
 
@@ -40,7 +40,7 @@ namespace Microsoft.Azure.WebJobs.Host.Listeners
         {
             // When recovery is enabled, we don't do retries on the individual lock attempts,
             // since retries are being done outside
-            bool recoveryEnabled = _singletonConfig.ListenerLockRecoveryPollingInterval != Timeout.InfiniteTimeSpan;
+            bool recoveryEnabled = _singletonConfig.ListenerLockRecoveryPollingInterval != TimeSpan.MaxValue;
             _lockHandle = await _singletonManager.TryLockAsync(_lockId, null, _attribute, cancellationToken, retry: !recoveryEnabled);
 
             if (_lockHandle == null)

@@ -20,12 +20,12 @@ namespace Microsoft.Azure.WebJobs.Host
         public const string SingletonParameterName = "(singleton)";
         private readonly SingletonLock _singletonLock;
         private readonly SingletonWatcher _watcher;
-        private readonly string _scope;
+        private readonly string _scopeId;
 
-        public SingletonValueProvider(MethodInfo method, string scope, string functionInstanceId, SingletonAttribute attribute, SingletonManager singletonManager)
+        public SingletonValueProvider(MethodInfo method, string scopeId, string functionInstanceId, SingletonAttribute attribute, SingletonManager singletonManager)
         {
-            _scope = string.IsNullOrEmpty(scope) ? "default" : scope;
-            string lockId = SingletonManager.FormatLockId(method, scope);
+            _scopeId = string.IsNullOrEmpty(scopeId) ? "(null)" : scopeId;
+            string lockId = singletonManager.FormatLockId(method, attribute.Scope, scopeId);
             _singletonLock = new SingletonLock(lockId, functionInstanceId, attribute, singletonManager);
             _watcher = new SingletonWatcher(_singletonLock);
         }
@@ -52,8 +52,8 @@ namespace Microsoft.Azure.WebJobs.Host
         }
 
         public string ToInvokeString()
-        {       
-            return string.Format(CultureInfo.InvariantCulture, "Scope: {0}", _scope);
+        {
+            return string.Format(CultureInfo.InvariantCulture, "ScopeId: {0}", _scopeId);
         }
 
         /// <summary>
@@ -108,7 +108,6 @@ namespace Microsoft.Azure.WebJobs.Host
                     {
                         // periodically determine and log the current owner
                         Task<string> task = _singletonLock.GetOwnerAsync(CancellationToken.None);
-                        task.Wait();
                         _log.LockOwner = task.Result;
 
                         _lastOwnerCheck = DateTime.UtcNow;

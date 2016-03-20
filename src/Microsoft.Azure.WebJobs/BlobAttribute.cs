@@ -5,15 +5,13 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 using System.IO;
 
 namespace Microsoft.Azure.WebJobs
 {
     /// <summary>
-    /// Represents an attribute for binding parameters to Azure Blobs.
-    /// The attribute supports binding to single blobs, blob containers,
-    /// or collections of blobs.
+    /// Attribute used to bind a parameter to an Azure Blob. The attribute supports binding
+    /// to single blobs, blob containers, or collections of blobs.
     /// </summary>
     /// <remarks>
     /// The method parameter type can be one of the following:
@@ -27,7 +25,12 @@ namespace Microsoft.Azure.WebJobs
     /// <item><description><see cref="TextWriter"/></description></item>
     /// <item><description>
     /// <see cref="string"/> (normally for reading, or as an out parameter for writing)
-    /// </description></item>
+    /// </description>
+    /// </item>
+    /// <item><description>
+    /// <see cref="T:byte[]"/> (normally for reading, or as an out parameter for writing)
+    /// </description>
+    /// </item>
     /// <item><description>
     /// A custom type implementing <see cref="ICloudBlobStreamBinder{T}"/> (normally for reading, or as an out parameter for
     /// writing)

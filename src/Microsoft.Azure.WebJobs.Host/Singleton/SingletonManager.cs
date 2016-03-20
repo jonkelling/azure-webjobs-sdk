@@ -34,19 +34,22 @@ namespace Microsoft.Azure.WebJobs.Host
         private ConcurrentDictionary<string, IStorageBlobDirectory> _lockDirectoryMap = new ConcurrentDictionary<string, IStorageBlobDirectory>(StringComparer.OrdinalIgnoreCase);
         private TimeSpan _minimumLeaseRenewalInterval = TimeSpan.FromSeconds(1);
         private TraceWriter _trace;
+        private IHostIdProvider _hostIdProvider;
+        private string _hostId;
 
         // For mock testing only
         internal SingletonManager()
         {
         }
 
-        public SingletonManager(IStorageAccountProvider accountProvider, IBackgroundExceptionDispatcher backgroundExceptionDispatcher, SingletonConfiguration config, TraceWriter trace, INameResolver nameResolver = null)
+        public SingletonManager(IStorageAccountProvider accountProvider, IBackgroundExceptionDispatcher backgroundExceptionDispatcher, SingletonConfiguration config, TraceWriter trace, IHostIdProvider hostIdProvider, INameResolver nameResolver = null)
         {
             _accountProvider = accountProvider;
             _nameResolver = nameResolver;
             _backgroundExceptionDispatcher = backgroundExceptionDispatcher;
             _config = config;
             _trace = trace;
+            _hostIdProvider = hostIdProvider;
         }
 
         internal virtual SingletonConfiguration Config
@@ -54,6 +57,18 @@ namespace Microsoft.Azure.WebJobs.Host
             get
             {
                 return _config;
+            }
+        }
+
+        internal string HostId
+        {
+            get
+            {
+                if (_hostId == null)
+                {
+                    _hostId = _hostIdProvider.GetHostIdAsync(CancellationToken.None).Result;
+                }
+                return _hostId;
             }
         }
 
@@ -87,12 +102,10 @@ namespace Microsoft.Azure.WebJobs.Host
 
         public async virtual Task<object> TryLockAsync(string lockId, string functionInstanceId, SingletonAttribute attribute, CancellationToken cancellationToken, bool retry = true)
         {
-            IStorageBlobDirectory lockDirectory = GetLockDirectory(attribute.Account);
-            IStorageBlockBlob lockBlob = lockDirectory.GetBlockBlobReference(lockId);
-            await TryCreateAsync(lockBlob, cancellationToken);
-
             _trace.Verbose(string.Format(CultureInfo.InvariantCulture, "Waiting for Singleton lock ({0})", lockId), source: TraceSource.Execution);
 
+            IStorageBlobDirectory lockDirectory = GetLockDirectory(attribute.Account);
+            IStorageBlockBlob lockBlob = lockDirectory.GetBlockBlobReference(lockId);
             TimeSpan lockPeriod = GetLockPeriod(attribute, _config);
             string leaseId = await TryAcquireLeaseAsync(lockBlob, lockPeriod, cancellationToken);
             if (string.IsNullOrEmpty(leaseId) && retry)
@@ -102,12 +115,13 @@ namespace Microsoft.Azure.WebJobs.Host
                 TimeSpan acquisitionTimeout = attribute.LockAcquisitionTimeout != null
                     ? TimeSpan.FromSeconds(attribute.LockAcquisitionTimeout.Value) :
                     _config.LockAcquisitionTimeout;
-                double remainingWaitTime = acquisitionTimeout.TotalMilliseconds;
-                while (string.IsNullOrEmpty(leaseId) && remainingWaitTime > 0)
+
+                TimeSpan timeWaited = TimeSpan.Zero;
+                while (string.IsNullOrEmpty(leaseId) && (timeWaited < acquisitionTimeout))
                 {
                     await Task.Delay(_config.LockAcquisitionPollingInterval);
+                    timeWaited += _config.LockAcquisitionPollingInterval;
                     leaseId = await TryAcquireLeaseAsync(lockBlob, lockPeriod, cancellationToken);
-                    remainingWaitTime -= _config.LockAcquisitionPollingInterval.TotalMilliseconds;
                 }
             }
 
@@ -153,32 +167,54 @@ namespace Microsoft.Azure.WebJobs.Host
             _trace.Verbose(string.Format(CultureInfo.InvariantCulture, "Singleton lock released ({0})", singletonLockHandle.LockId), source: TraceSource.Execution);
         }
 
-        public static string FormatLockId(MethodInfo method, string scope)
+        public string FormatLockId(MethodInfo method, SingletonScope scope, string scopeId)
         {
-            string lockId = string.Format(CultureInfo.InvariantCulture, "{0}.{1}", method.DeclaringType.FullName, method.Name);
-            if (!string.IsNullOrEmpty(scope))
+            return FormatLockId(method, scope, HostId, scopeId);
+        }
+
+        public static string FormatLockId(MethodInfo method, SingletonScope scope, string hostId, string scopeId)
+        {
+            if (string.IsNullOrEmpty(hostId))
             {
-                lockId += "." + scope;
+                throw new ArgumentNullException("hostId");
             }
+
+            string lockId = string.Empty;
+            if (scope == SingletonScope.Function)
+            {
+                lockId += string.Format(CultureInfo.InvariantCulture, "{0}.{1}", method.DeclaringType.FullName, method.Name);
+            }
+
+            if (!string.IsNullOrEmpty(scopeId))
+            {
+                if (!string.IsNullOrEmpty(lockId))
+                {
+                    lockId += ".";
+                }
+                lockId += scopeId;
+            }
+
+            lockId = string.Format(CultureInfo.InvariantCulture, "{0}/{1}", hostId, lockId);
+
             return lockId;
         }
 
-        public string GetBoundScope(string scope, IReadOnlyDictionary<string, object> bindingData = null)
+        public string GetBoundScopeId(string scopeId, IReadOnlyDictionary<string, object> bindingData = null)
         {
             if (_nameResolver != null)
             {
-                scope = _nameResolver.ResolveWholeString(scope);
+                scopeId = _nameResolver.ResolveWholeString(scopeId);
             }
 
             if (bindingData != null)
             {
-                BindingTemplate bindingTemplate = BindingTemplate.FromString(scope);
+                BindingTemplate bindingTemplate = BindingTemplate.FromString(scopeId);
                 IReadOnlyDictionary<string, string> parameters = BindingDataPathHelper.ConvertParameters(bindingData);
                 return bindingTemplate.Bind(parameters);
             }
             else
             {
-                return scope;
+                return scopeId;
             }
         }
 
@@ -191,15 +227,18 @@ namespace Microsoft.Azure.WebJobs.Host
             }
 
             SingletonAttribute[] singletonAttributes = method.GetCustomAttributes<SingletonAttribute>().Where(p => p.Mode == SingletonMode.Function).ToArray();
+            SingletonAttribute singletonAttribute = null;
             if (singletonAttributes.Length > 1)
             {
                 throw new NotSupportedException("Only one SingletonAttribute using mode 'Function' is allowed.");
             }
             else if (singletonAttributes.Length == 1)
             {
-                return singletonAttributes[0];
+                singletonAttribute = singletonAttributes[0];
+                ValidateSingletonAttribute(singletonAttribute, SingletonMode.Function);
             }
-            return null;
+
+            return singletonAttribute;
         }
 
         public static SingletonAttribute GetListenerSingletonOrNull(Type listenerType, MethodInfo method)
@@ -221,7 +260,25 @@ namespace Microsoft.Azure.WebJobs.Host
                 singletonAttribute = listenerType.GetCustomAttributes<SingletonAttribute>().SingleOrDefault(p => p.Mode == SingletonMode.Listener);
             }
 
+            if (singletonAttribute != null)
+            {
+                ValidateSingletonAttribute(singletonAttribute, SingletonMode.Listener);
+            }
+
             return singletonAttribute;
+        }
+
+        internal static void ValidateSingletonAttribute(SingletonAttribute attribute, SingletonMode mode)
+        {
+            if (attribute.Scope == SingletonScope.Host && string.IsNullOrEmpty(attribute.ScopeId))
+            {
+                throw new InvalidOperationException("A ScopeId value must be provided when using scope 'Host'.");
+            }
+
+            if (mode == SingletonMode.Listener && attribute.Scope == SingletonScope.Host)
+            {
+                throw new InvalidOperationException("Scope 'Host' cannot be used when the mode is set to 'Listener'.");
+            }
         }
 
         public async virtual Task<string> GetLockOwnerAsync(SingletonAttribute attribute, string lockId, CancellationToken cancellationToken)
@@ -285,26 +342,59 @@ namespace Microsoft.Azure.WebJobs.Host
 
         private async Task<string> TryAcquireLeaseAsync(IStorageBlockBlob blob, TimeSpan leasePeriod, CancellationToken cancellationToken)
         {
+            bool blobDoesNotExist = false;
             try
             {
+                // Optimistically try to acquire the lease. The blob may not yet
+                // exist. If it doesn't we handle the 404, create it, and retry below
                 return await blob.AcquireLeaseAsync(leasePeriod, null, cancellationToken);
             }
             catch (StorageException exception)
             {
-                if (exception.IsConflictLeaseAlreadyPresent())
+                if (exception.RequestInformation != null)
                 {
-                    return null;
-                }
-                else if (exception.IsNotFoundBlobOrContainerNotFound())
-                {
-                    // If someone deleted the receipt, there's no lease to acquire.
-                    return null;
+                    if (exception.RequestInformation.HttpStatusCode == 409)
+                    {
+                        return null;
+                    }
+                    else if (exception.RequestInformation.HttpStatusCode == 404)
+                    {
+                        blobDoesNotExist = true;
+                    }
+                    else
+                    {
+                        throw;
+                    }
                 }
                 else
                 {
                     throw;
                 }
             }
+
+            if (blobDoesNotExist)
+            {
+                await TryCreateAsync(blob, cancellationToken);
+
+                try
+                {
+                    return await blob.AcquireLeaseAsync(leasePeriod, null, cancellationToken);
+                }
+                catch (StorageException exception)
+                {
+                    if (exception.RequestInformation != null &&
+                        exception.RequestInformation.HttpStatusCode == 409)
+                    {
+                        return null;
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+            }
+
+            return null;
         }
 
         private async Task ReleaseLeaseAsync(IStorageBlockBlob blob, string leaseId, CancellationToken cancellationToken)
@@ -321,13 +411,19 @@ namespace Microsoft.Azure.WebJobs.Host
             }
             catch (StorageException exception)
             {
-                if (exception.IsNotFoundBlobOrContainerNotFound())
+                if (exception.RequestInformation != null)
                 {
-                    // The user deleted the receipt or its container; nothing to release at this point.
-                }
-                else if (exception.IsConflictLeaseIdMismatchWithLeaseOperation())
-                {
-                    // Another lease is active; nothing for this lease to release at this point.
+                    if (exception.RequestInformation.HttpStatusCode == 404 ||
+                        exception.RequestInformation.HttpStatusCode == 409)
+                    {
+                        // if the blob no longer exists, or there is another lease
+                        // now active, there is nothing for us to release so we can
+                        // ignore
+                    }
+                    else
+                    {
+                        throw;
+                    }
                 }
                 else
                 {
@@ -338,32 +434,31 @@ namespace Microsoft.Azure.WebJobs.Host
 
         private async Task<bool> TryCreateAsync(IStorageBlockBlob blob, CancellationToken cancellationToken)
         {
-            AccessCondition accessCondition = new AccessCondition { IfNoneMatchETag = "*" };
             bool isContainerNotFoundException = false;
 
             try
             {
-                await blob.UploadTextAsync(String.Empty,
-                    encoding: null,
-                    accessCondition: accessCondition,
-                    options: null,
-                    operationContext: null,
-                    cancellationToken: cancellationToken);
+                await blob.UploadTextAsync(string.Empty, cancellationToken: cancellationToken);
                 return true;
             }
             catch (StorageException exception)
             {
-                if (exception.IsNotFoundContainerNotFound())
+                if (exception.RequestInformation != null)
                 {
-                    isContainerNotFoundException = true;
-                }
-                else if (exception.IsConflictBlobAlreadyExists())
-                {
-                    return false;
-                }
-                else if (exception.IsPreconditionFailedLeaseIdMissing())
-                {
-                    return false;
+                    if (exception.RequestInformation.HttpStatusCode == 404)
+                    {
+                        isContainerNotFoundException = true;
+                    }
+                    else if (exception.RequestInformation.HttpStatusCode == 409 || 
+                             exception.RequestInformation.HttpStatusCode == 412)
+                    {
+                        // The blob already exists, or is leased by someone else
+                        return false;
+                    }
+                    else
+                    {
+                        throw;
+                    }
                 }
                 else
                 {
@@ -376,22 +471,15 @@ namespace Microsoft.Azure.WebJobs.Host
 
             try
             {
-                await blob.UploadTextAsync(String.Empty,
-                    encoding: null,
-                    accessCondition: accessCondition,
-                    options: null,
-                    operationContext: null,
-                    cancellationToken: cancellationToken);
+                await blob.UploadTextAsync(string.Empty, cancellationToken: cancellationToken);
                 return true;
             }
             catch (StorageException exception)
             {
-                if (exception.IsConflictBlobAlreadyExists())
+                if (exception.RequestInformation != null &&
+                    (exception.RequestInformation.HttpStatusCode == 409 || exception.RequestInformation.HttpStatusCode == 412))
                 {
-                    return false;
-                }
-                else if (exception.IsPreconditionFailedLeaseIdMissing())
-                {
+                    // The blob already exists, or is leased by someone else
                     return false;
                 }
                 else
@@ -405,29 +493,11 @@ namespace Microsoft.Azure.WebJobs.Host
         {
             blob.Metadata.Add(FunctionInstanceMetadataKey, functionInstanceId);
 
-            try
-            {
-                await blob.SetMetadataAsync(
-                    accessCondition: new AccessCondition { LeaseId = leaseId },
-                    options: null,
-                    operationContext: null,
-                    cancellationToken: cancellationToken);
-            }
-            catch (StorageException exception)
-            {
-                if (exception.IsNotFoundBlobOrContainerNotFound())
-                {
-                    // The user deleted the receipt or its container;
-                }
-                else if (exception.IsPreconditionFailedLeaseLost())
-                {
-                    // The lease expired;
-                }
-                else
-                {
-                    throw;
-                }
-            }
+            await blob.SetMetadataAsync(
+                accessCondition: new AccessCondition { LeaseId = leaseId },
+                options: null,
+                operationContext: null,
+                cancellationToken: cancellationToken);
         }
 
         private async Task ReadLeaseBlobMetadata(IStorageBlockBlob blob, CancellationToken cancellationToken)
@@ -438,9 +508,10 @@ namespace Microsoft.Azure.WebJobs.Host
             }
             catch (StorageException exception)
             {
-                if (exception.IsNotFoundBlobOrContainerNotFound())
+                if (exception.RequestInformation != null &&
+                    exception.RequestInformation.HttpStatusCode == 404)
                 {
-                    // The user deleted the receipt or its container;
+                    // the blob no longer exists
                 }
                 else
                 {

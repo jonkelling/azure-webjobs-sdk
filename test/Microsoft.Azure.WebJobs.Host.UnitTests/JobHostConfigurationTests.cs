@@ -4,10 +4,18 @@
 using System;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using Microsoft.Azure.WebJobs.Host.Executors;
 using Microsoft.Azure.WebJobs.Host.Indexers;
 using Microsoft.Azure.WebJobs.Host.TestCommon;
 using Xunit;
+using System.IO;
+using Microsoft.Azure.WebJobs.Host.Loggers;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Text;
+using System.Collections.Generic;
+using Newtonsoft.Json;
 
 namespace Microsoft.Azure.WebJobs.Host.UnitTests
 {
@@ -179,6 +187,7 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests
         [InlineData(typeof(StorageClientFactory), typeof(StorageClientFactory))]
         [InlineData(typeof(INameResolver), typeof(DefaultNameResolver))]
         [InlineData(typeof(IJobActivator), typeof(DefaultJobActivator))]
+        [InlineData(typeof(IConverterManager), typeof(ConverterManager))]
         public void GetService_ReturnsExpectedDefaultServices(Type serviceType, Type expectedInstanceType)
         {
             JobHostConfiguration configuration = new JobHostConfiguration();
@@ -273,6 +282,44 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests
             Assert.Same(customFactory, configuration.GetService<StorageClientFactory>());
         }
 
+        [Theory]
+        [InlineData(null, false)]
+        [InlineData("Blah", false)]
+        [InlineData("Development", true)]
+        [InlineData("development", true)]
+        public void IsDevelopment_ReturnsCorrectValue(string settingValue, bool expected)
+        {
+            string prev = Environment.GetEnvironmentVariable(Constants.EnvironmentSettingName);
+            Environment.SetEnvironmentVariable(Constants.EnvironmentSettingName, settingValue);
+
+            JobHostConfiguration config = new JobHostConfiguration();
+            Assert.Equal(config.IsDevelopment, expected);
+
+            Environment.SetEnvironmentVariable(Constants.EnvironmentSettingName, prev);
+        }
+
+        [Fact]
+        public void UseDevelopmentSettings_ConfiguresCorrectValues()
+        {
+            string prev = Environment.GetEnvironmentVariable(Constants.EnvironmentSettingName);
+            Environment.SetEnvironmentVariable(Constants.EnvironmentSettingName, "Development");
+
+            JobHostConfiguration config = new JobHostConfiguration();
+            Assert.False(config.UsingDevelopmentSettings);
+
+            if (config.IsDevelopment)
+            {
+                config.UseDevelopmentSettings();
+            }
+
+            Assert.True(config.UsingDevelopmentSettings);
+            Assert.Equal(TraceLevel.Verbose, config.Tracing.ConsoleLevel);
+            Assert.Equal(TimeSpan.FromSeconds(2), config.Queues.MaxPollingInterval);
+            Assert.Equal(TimeSpan.FromSeconds(15), config.Singleton.ListenerLockPeriod);
+
+            Environment.SetEnvironmentVariable(Constants.EnvironmentSettingName, prev);
+        }
+
         private static void TestHostIdThrows(string hostId)
         {
             // Arrange
@@ -286,6 +333,111 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests
 
         private class CustomStorageClientFactory : StorageClientFactory
         {
+        }
+
+        class FastLogger : IAsyncCollector<FunctionInstanceLogEntry>
+        {
+            public List<FunctionInstanceLogEntry> List = new List<FunctionInstanceLogEntry>();
+
+            public static FunctionInstanceLogEntry FlushEntry = new FunctionInstanceLogEntry(); // marker for flushes 
+
+            public Task AddAsync(FunctionInstanceLogEntry item, CancellationToken cancellationToken = default(CancellationToken))
+            {
+                var clone = JsonConvert.DeserializeObject< FunctionInstanceLogEntry>(JsonConvert.SerializeObject(item));
+                List.Add(clone);
+                return Task.FromResult(0);
+            }
+
+            public Task FlushAsync(CancellationToken cancellationToken = default(CancellationToken))
+            {
+                List.Add(FlushEntry);
+                return Task.FromResult(0);
+            }
+        }
+
+
+        // Test that we can explicitly disable storage and call through a function
+        // And enable the fast table logger and ensure that's getting events. 
+        [Fact]
+        public void JobHost_NoStorage_Succeeds()
+        {
+            string prevStorage  = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
+            string prevDashboard = Environment.GetEnvironmentVariable("AzureWebJobsDashboard");
+            try
+            {
+                Environment.SetEnvironmentVariable("AzureWebJobsStorage", null);
+                Environment.SetEnvironmentVariable("AzureWebJobsDashboard", null);
+
+                JobHostConfiguration config = new JobHostConfiguration()
+                {
+                    TypeLocator = new FakeTypeLocator(typeof(BasicTest))
+                };
+                // Explicitly disalbe storage. 
+                config.HostId = Guid.NewGuid().ToString("n");
+                config.DashboardConnectionString = null;
+                config.StorageConnectionString = null;
+
+                var randomValue = Guid.NewGuid().ToString();
+
+                StringBuilder sbLoggingCallbacks = new StringBuilder();                
+                var fastLogger = new FastLogger();
+                config.AddService<IAsyncCollector<FunctionInstanceLogEntry>>(fastLogger);
+
+                JobHost host = new JobHost(config);
+
+                // Manually invoked. 
+                var method = typeof(BasicTest).GetMethod("Method", BindingFlags.Public | BindingFlags.Static);
+                
+                host.Call(method, new { value = randomValue } );
+                Assert.True(BasicTest.Called);
+
+                Assert.Equal(2, fastLogger.List.Count); // We should be batching, so flush not called yet. 
+
+                host.Start(); // required to call stop()
+                host.Stop(); // will ensure flush is called. 
+
+                // Verify fast logs
+                Assert.Equal(3, fastLogger.List.Count);
+
+                var startMsg = fastLogger.List[0];
+                Assert.Equal("BasicTest.Method", startMsg.FunctionName);
+                Assert.Equal(null, startMsg.EndTime);
+                Assert.NotNull(startMsg.StartTime);
+
+                var endMsg = fastLogger.List[1];
+                Assert.Equal(startMsg.FunctionName, endMsg.FunctionName);
+                Assert.Equal(startMsg.StartTime, endMsg.StartTime);
+                Assert.Equal(startMsg.FunctionInstanceId, endMsg.FunctionInstanceId);
+                Assert.NotNull(endMsg.EndTime); // signal completed
+                Assert.True(endMsg.StartTime <= endMsg.EndTime);
+                Assert.Null(endMsg.ErrorDetails);
+                Assert.Null(endMsg.ParentId);
+
+                Assert.Equal(2, endMsg.Arguments.Count);
+                Assert.True(endMsg.Arguments.ContainsKey("log"));
+                Assert.Equal(randomValue, endMsg.Arguments["value"]);
+                Assert.Equal("val=" + randomValue, endMsg.LogOutput.Trim());
+
+                Assert.Same(FastLogger.FlushEntry, fastLogger.List[2]);
+
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("AzureWebJobsStorage", prevStorage);
+                Environment.SetEnvironmentVariable("AzureWebJobsDashboard", prevDashboard);
+            }
+        }
+
+        public class BasicTest
+        {
+            public static bool Called = false;
+
+            [NoAutomaticTrigger]
+            public static void Method(TextWriter log, string value)
+            {
+                log.Write("val={0}", value);
+                Called = true;
+            }
         }
     }
 }

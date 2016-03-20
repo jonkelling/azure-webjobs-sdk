@@ -47,8 +47,11 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             {
                 hostIdProvider = new FixedHostIdProvider(_config.HostId);
             }
+
+            var fastLogger = _config.GetService<IAsyncCollector<FunctionInstanceLogEntry>>();
+
             return await CreateAndLogHostStartedAsync(host, _storageAccountProvider, _config.Queues, _config.TypeLocator, _config.JobActivator,
-                _config.NameResolver, _consoleProvider, _config, shutdownToken, cancellationToken, hostIdProvider);
+                _config.NameResolver, _consoleProvider, _config, shutdownToken, cancellationToken, hostIdProvider, fastLogger: fastLogger);
         }
 
         public static async Task<JobHostContext> CreateAndLogHostStartedAsync(
@@ -70,7 +73,8 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             IFunctionInstanceLoggerProvider functionInstanceLoggerProvider = null,
             IFunctionOutputLoggerProvider functionOutputLoggerProvider = null,
             IBackgroundExceptionDispatcher backgroundExceptionDispatcher = null,
-            SingletonManager singletonManager = null)
+            SingletonManager singletonManager = null,
+            IAsyncCollector<FunctionInstanceLogEntry> fastLogger = null)
         {
             if (hostIdProvider == null)
             {
@@ -87,7 +91,7 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             ISharedContextProvider sharedContextProvider = new SharedContextProvider();
 
             // Create a wrapper TraceWriter that delegates to both the user 
-            // TraceWriter specified on Config (if present), as well as to Console
+            // TraceWriters specified via config (if present), as well as to Console
             TraceWriter trace = new ConsoleTraceWriter(config.Tracing, consoleProvider.Out);
 
             // Register system services with the service container
@@ -110,12 +114,27 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             {
                 bindingProvider = DefaultBindingProvider.Create(nameResolver, storageAccountProvider, extensionTypeLocator, messageEnqueuedWatcherAccessor, blobWrittenWatcherAccessor, extensions);
             }
-
-            DefaultLoggerProvider loggerProvider = new DefaultLoggerProvider(storageAccountProvider, trace);
+                        
+            bool hasFastTableHook = config.GetService<IAsyncCollector<FunctionInstanceLogEntry>>() != null;
+            bool noDashboardStorage = config.DashboardConnectionString == null;
+            if (hasFastTableHook && noDashboardStorage)
+            {
+                var loggerProvider = new FastTableLoggerProvider();
+                hostInstanceLogerProvider = loggerProvider;
+                functionInstanceLoggerProvider = loggerProvider;
+                functionOutputLoggerProvider = loggerProvider;
+            }
+            else
+            {
+                var loggerProvider = new DefaultLoggerProvider(storageAccountProvider, trace);
+                hostInstanceLogerProvider = loggerProvider;
+                functionInstanceLoggerProvider = loggerProvider;
+                functionOutputLoggerProvider = loggerProvider;
+            }
 
             if (singletonManager == null)
             {
-                singletonManager = new SingletonManager(storageAccountProvider, backgroundExceptionDispatcher, config.Singleton, trace, config.NameResolver);
+                singletonManager = new SingletonManager(storageAccountProvider, backgroundExceptionDispatcher, config.Singleton, trace, hostIdProvider, config.NameResolver);
             }
             
             using (CancellationTokenSource combinedCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdownToken))
@@ -126,44 +145,18 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
 
                 IStorageAccount dashboardAccount = await storageAccountProvider.GetDashboardAccountAsync(combinedCancellationToken);
 
-                IHostInstanceLogger hostInstanceLogger = null;
-                if (hostInstanceLogerProvider != null)
-                {
-                    hostInstanceLogger = await hostInstanceLogerProvider.GetAsync(combinedCancellationToken);
-                }
-                else
-                {
-                    hostInstanceLogger = await((IHostInstanceLoggerProvider)loggerProvider).GetAsync(combinedCancellationToken);
-                }
-
-                IFunctionInstanceLogger functionInstanceLogger = null;
-                if (functionInstanceLoggerProvider != null)
-                {
-                    functionInstanceLogger = await functionInstanceLoggerProvider.GetAsync(combinedCancellationToken);
-                }
-                else
-                {
-                    functionInstanceLogger = (IFunctionInstanceLogger)(await((IFunctionInstanceLoggerProvider)loggerProvider).GetAsync(combinedCancellationToken));
-                }
-
-                IFunctionOutputLogger functionOutputLogger = null;
-                if (functionOutputLoggerProvider != null)
-                {
-                    functionOutputLogger = await functionOutputLoggerProvider.GetAsync(combinedCancellationToken);
-                }
-                else
-                {
-                    functionOutputLogger = (IFunctionOutputLogger)(await((IFunctionOutputLoggerProvider)loggerProvider).GetAsync(combinedCancellationToken));
-                }
-
+                IHostInstanceLogger hostInstanceLogger = await hostInstanceLogerProvider.GetAsync(combinedCancellationToken);                
+                IFunctionInstanceLogger functionInstanceLogger = await functionInstanceLoggerProvider.GetAsync(combinedCancellationToken);                
+                IFunctionOutputLogger functionOutputLogger = await functionOutputLoggerProvider.GetAsync(combinedCancellationToken);
+                
                 if (functionExecutor == null)
                 {
-                    functionExecutor = new FunctionExecutor(functionInstanceLogger, functionOutputLogger, backgroundExceptionDispatcher, trace, config.FunctionTimeout);
+                    functionExecutor = new FunctionExecutor(functionInstanceLogger, functionOutputLogger, backgroundExceptionDispatcher, trace, config.FunctionTimeout, fastLogger);
                 }
 
                 if (functionIndexProvider == null)
                 {
-                    functionIndexProvider = new FunctionIndexProvider(typeLocator, triggerBindingProvider, bindingProvider, activator, functionExecutor, extensions, singletonManager);
+                    functionIndexProvider = new FunctionIndexProvider(typeLocator, triggerBindingProvider, bindingProvider, activator, functionExecutor, extensions, singletonManager, trace);
                 }
 
                 IFunctionIndex functions = await functionIndexProvider.GetAsync(combinedCancellationToken);
@@ -173,10 +166,16 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
                 IListener listener;
                 HostOutputMessage hostOutputMessage;
 
+                string hostId = await hostIdProvider.GetHostIdAsync(cancellationToken);
+                if (string.Compare(config.HostId, hostId, StringComparison.OrdinalIgnoreCase) != 0)
+                {
+                    // if this isn't a static host ID, provide the HostId on the config
+                    // so it is accessible
+                    config.HostId = hostId;
+                }
+
                 if (dashboardAccount != null)
                 {
-                    string hostId = await hostIdProvider.GetHostIdAsync(cancellationToken);
-
                     string sharedQueueName = HostQueueNames.GetHostQueueName(hostId);
                     IStorageQueueClient dashboardQueueClient = dashboardAccount.CreateQueueClient();
                     IStorageQueue sharedQueue = dashboardQueueClient.GetQueueReference(sharedQueueName);
@@ -243,9 +242,15 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
                 IEnumerable<FunctionDescriptor> descriptors = functions.ReadAllDescriptors();
                 int descriptorsCount = descriptors.Count();
 
+                if (config.UsingDevelopmentSettings)
+                {
+                    trace.Verbose(string.Format("Development settings applied"));
+                }
+
                 if (descriptorsCount == 0)
                 {
-                    trace.Warning("No functions found. Try making job classes and methods public.", TraceSource.Indexing);
+                    trace.Warning(string.Format("No job functions found. Try making your job classes and methods public. {0}", 
+                        Constants.ExtensionInitializationMessage), TraceSource.Indexing);
                 }
                 else
                 {
@@ -260,7 +265,7 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
                     trace.Info(functionsTrace.ToString(), TraceSource.Indexing);
                 }
 
-                return new JobHostContext(functions, hostCallExecutor, listener, trace);
+                return new JobHostContext(functions, hostCallExecutor, listener, trace, fastLogger);
             }
         }
 

@@ -11,8 +11,7 @@ using Microsoft.Azure.WebJobs.Host.Storage.Blob;
 
 namespace Microsoft.Azure.WebJobs.Host.Loggers
 {
-    internal class DefaultLoggerProvider : IHostInstanceLoggerProvider, IFunctionInstanceLoggerProvider,
-        IFunctionOutputLoggerProvider
+    internal class DefaultLoggerProvider : IHostInstanceLoggerProvider, IFunctionInstanceLoggerProvider, IFunctionOutputLoggerProvider
     {
         private readonly IStorageAccountProvider _storageAccountProvider;
 
@@ -69,8 +68,7 @@ namespace Microsoft.Azure.WebJobs.Host.Loggers
             {
                 // Create logging against a live Azure account.
                 IStorageBlobClient dashboardBlobClient = dashboardAccount.CreateBlobClient();
-                IPersistentQueueWriter<PersistentQueueMessage> queueWriter =
-                    new PersistentQueueWriter<PersistentQueueMessage>(dashboardBlobClient);
+                IPersistentQueueWriter<PersistentQueueMessage> queueWriter = new PersistentQueueWriter<PersistentQueueMessage>(dashboardBlobClient);
                 PersistentQueueLogger queueLogger = new PersistentQueueLogger(queueWriter);
                 _hostInstanceLogger = queueLogger;
                 _functionInstanceLogger = new CompositeFunctionInstanceLogger(queueLogger, traceWriterFunctionLogger);

@@ -28,14 +28,14 @@ namespace Microsoft.Azure.WebJobs.ServiceBus.UnitTests
         }
 
         [Fact]
-        public async Task CreateMessagingFactoryAsync_ReturnsExpectedFactory()
+        public void CreateMessagingFactoryAsync_ReturnsExpectedFactory()
         {
             // default connection
-            MessagingFactory factory = await _provider.CreateMessagingFactoryAsync("test");
+            MessagingFactory factory = _provider.CreateMessagingFactory("test");
             Assert.Equal("default.servicebus.windows.net", factory.Address.Host);
 
             // override connection
-            factory = await _provider.CreateMessagingFactoryAsync("test", "ServiceBusOverride");
+            factory = _provider.CreateMessagingFactory("test", "ServiceBusOverride");
             Assert.Equal("override.servicebus.windows.net", factory.Address.Host);
         }
 
@@ -49,6 +49,18 @@ namespace Microsoft.Azure.WebJobs.ServiceBus.UnitTests
             // override connection
             manager = _provider.CreateNamespaceManager("ServiceBusOverride");
             Assert.Equal("override.servicebus.windows.net", manager.Address.Host);
+        }
+
+        [Fact]
+        public void CreateMessageReceiver_ReturnsExpectedReceiver()
+        {
+            MessagingFactory factory = _provider.CreateMessagingFactory("test");
+            MessageReceiver receiver = _provider.CreateMessageReceiver(factory, "test");
+            Assert.Equal("test", receiver.Path);
+
+            _config.PrefetchCount = 100;
+            receiver = _provider.CreateMessageReceiver(factory, "test");
+            Assert.Equal(100, receiver.PrefetchCount);
         }
 
         [Fact]

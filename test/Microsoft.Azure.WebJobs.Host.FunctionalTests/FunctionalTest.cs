@@ -240,19 +240,17 @@ namespace Microsoft.Azure.WebJobs.Host.FunctionalTests
 
             IFunctionInstanceLoggerProvider functionInstanceLoggerProvider = new NullFunctionInstanceLoggerProvider();
             IFunctionOutputLoggerProvider functionOutputLoggerProvider = new NullFunctionOutputLoggerProvider();
-            Task<IFunctionOutputLogger> task = functionOutputLoggerProvider.GetAsync(CancellationToken.None);
-            task.Wait();
-            IFunctionOutputLogger functionOutputLogger = task.Result;
+            IFunctionOutputLogger functionOutputLogger = functionOutputLoggerProvider.GetAsync(CancellationToken.None).Result;
             FunctionExecutor executor = new FunctionExecutor(functionInstanceLogger, functionOutputLogger, backgroundExceptionDispatcher, new TestTraceWriter(TraceLevel.Verbose), null);
 
             SingletonConfiguration singletonConfig = new SingletonConfiguration();
             TestTraceWriter trace = new TestTraceWriter(TraceLevel.Verbose);
-            SingletonManager singletonManager = new SingletonManager(storageAccountProvider, backgroundExceptionDispatcher, singletonConfig, trace);
+            SingletonManager singletonManager = new SingletonManager(storageAccountProvider, backgroundExceptionDispatcher, singletonConfig, trace, hostIdProvider);
 
             ITypeLocator typeLocator = new FakeTypeLocator(programType);
             FunctionIndexProvider functionIndexProvider = new FunctionIndexProvider(
                 typeLocator, triggerBindingProvider, bindingProvider,
-                activator, executor, extensions, singletonManager);
+                activator, executor, extensions, singletonManager, trace);
 
             IJobHostContextFactory contextFactory = new FakeJobHostContextFactory
             {
@@ -340,7 +338,7 @@ namespace Microsoft.Azure.WebJobs.Host.FunctionalTests
                 host.Start();
 
                 // Act
-                completed = task.WaitUntilCompleted(10 * 1000);
+                completed = task.WaitUntilCompleted(25 * 1000);
 
                 // Assert
                 Assert.True(completed);

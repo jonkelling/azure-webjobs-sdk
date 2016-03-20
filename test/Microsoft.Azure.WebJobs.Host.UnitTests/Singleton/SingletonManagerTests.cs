@@ -22,6 +22,7 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
 {
     public class SingletonManagerTests
     {
+        private const string TestHostId = "testhost";
         private const string TestLockId = "testid";
         private const string TestInstanceId = "testinstance";
         private const string TestLeaseId = "testleaseid";
@@ -75,7 +76,7 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
             _singletonConfig.LockAcquisitionTimeout = TimeSpan.FromMilliseconds(200);
 
             _nameResolver = new TestNameResolver(); 
-            _singletonManager = new SingletonManager(_mockAccountProvider.Object, _mockExceptionDispatcher.Object, _singletonConfig, _trace, _nameResolver);
+            _singletonManager = new SingletonManager(_mockAccountProvider.Object, _mockExceptionDispatcher.Object, _singletonConfig, _trace, new FixedHostIdProvider(TestHostId), _nameResolver);
 
             _singletonManager.MinimumLeaseRenewalInterval = TimeSpan.FromMilliseconds(250);
         }
@@ -94,11 +95,44 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
         }
 
         [Fact]
+        public async Task TryLockAsync_CreatesBlob_WhenItDoesNotExist()
+        {
+            CancellationToken cancellationToken = new CancellationToken();
+            RequestResult storageResult = new RequestResult
+            {
+                HttpStatusCode = 404
+            };
+            StorageException storageException = new StorageException(storageResult, null, null);
+
+            int count = 0;
+            _mockStorageBlob.Setup(p => p.AcquireLeaseAsync(_singletonConfig.LockPeriod, null, cancellationToken)).Returns(() =>
+            {
+                if (count++ == 0)
+                {
+                    throw storageException;
+                }
+                return Task.FromResult(TestLeaseId);
+            });
+
+            _mockStorageBlob.Setup(p => p.UploadTextAsync(string.Empty, null, null, null, null, cancellationToken)).Returns(Task.FromResult(true));
+            _mockStorageBlob.SetupGet(p => p.Metadata).Returns(_mockBlobMetadata);
+            _mockStorageBlob.Setup(p => p.SetMetadataAsync(It.Is<AccessCondition>(q => q.LeaseId == TestLeaseId), null, null, cancellationToken)).Returns(Task.FromResult(true));
+            _mockStorageBlob.Setup(p => p.ReleaseLeaseAsync(It.Is<AccessCondition>(q => q.LeaseId == TestLeaseId), null, null, cancellationToken)).Returns(Task.FromResult(true));
+
+            SingletonAttribute attribute = new SingletonAttribute();
+            SingletonManager.SingletonLockHandle lockHandle = (SingletonManager.SingletonLockHandle)await _singletonManager.TryLockAsync(TestLockId, TestInstanceId, attribute, cancellationToken);
+
+            Assert.Same(_mockStorageBlob.Object, lockHandle.Blob);
+            Assert.Equal(TestLeaseId, lockHandle.LeaseId);
+            Assert.Equal(1, _mockStorageBlob.Object.Metadata.Keys.Count);
+            Assert.Equal(_mockStorageBlob.Object.Metadata[SingletonManager.FunctionInstanceMetadataKey], TestInstanceId);
+        }
+
+        [Fact]
         public async Task TryLockAsync_CreatesBlobLease_WithAutoRenewal()
         {
             CancellationToken cancellationToken = new CancellationToken();
             _mockStorageBlob.SetupGet(p => p.Metadata).Returns(_mockBlobMetadata);
-            _mockStorageBlob.Setup(p => p.UploadTextAsync(string.Empty, null, It.Is<AccessCondition>(q => q.IfNoneMatchETag == "*"), null, null, cancellationToken)).Returns(Task.FromResult(true));
             _mockStorageBlob.Setup(p => p.AcquireLeaseAsync(_singletonConfig.LockPeriod, null, cancellationToken)).ReturnsAsync(TestLeaseId);
             _mockStorageBlob.Setup(p => p.SetMetadataAsync(It.Is<AccessCondition>(q => q.LeaseId == TestLeaseId), null, null, cancellationToken)).Returns(Task.FromResult(true));
             _mockStorageBlob.Setup(p => p.ReleaseLeaseAsync(It.Is<AccessCondition>(q => q.LeaseId == TestLeaseId), null, null, cancellationToken)).Returns(Task.FromResult(true));
@@ -148,7 +182,6 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
         {
             CancellationToken cancellationToken = new CancellationToken();
             _mockStorageBlob.SetupGet(p => p.Metadata).Returns(_mockBlobMetadata);
-            _mockStorageBlob.Setup(p => p.UploadTextAsync(string.Empty, null, It.Is<AccessCondition>(q => q.IfNoneMatchETag == "*"), null, null, cancellationToken)).Returns(Task.FromResult(true));
             _mockStorageBlob.Setup(p => p.SetMetadataAsync(It.Is<AccessCondition>(q => q.LeaseId == TestLeaseId), null, null, cancellationToken)).Returns(Task.FromResult(true));
 
             int numRetries = 3;
@@ -163,6 +196,7 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
             SingletonAttribute attribute = new SingletonAttribute();
             SingletonManager.SingletonLockHandle lockHandle = (SingletonManager.SingletonLockHandle)await _singletonManager.TryLockAsync(TestLockId, TestInstanceId, attribute, cancellationToken);
 
+            Assert.NotNull(lockHandle);
             Assert.Equal(TestLeaseId, lockHandle.LeaseId);
             Assert.Equal(numRetries, count - 1);
             Assert.NotNull(lockHandle.LeaseRenewalTimer);
@@ -174,7 +208,6 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
         public async Task TryLockAsync_WithContention_NoRetry_DoesNotPollForLease()
         {
             CancellationToken cancellationToken = new CancellationToken();
-            _mockStorageBlob.Setup(p => p.UploadTextAsync(string.Empty, null, It.Is<AccessCondition>(q => q.IfNoneMatchETag == "*"), null, null, cancellationToken)).Returns(Task.FromResult(true));
 
             int count = 0;
             _mockStorageBlob.Setup(p => p.AcquireLeaseAsync(_singletonConfig.LockPeriod, null, cancellationToken))
@@ -198,7 +231,6 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
         public async Task LockAsync_WithContention_AcquisitionTimeoutExpires_Throws()
         {
             CancellationToken cancellationToken = new CancellationToken();
-            _mockStorageBlob.Setup(p => p.UploadTextAsync(string.Empty, null, It.Is<AccessCondition>(q => q.IfNoneMatchETag == "*"), null, null, cancellationToken)).Returns(Task.FromResult(true));
 
             int count = 0;
             _mockStorageBlob.Setup(p => p.AcquireLeaseAsync(_singletonConfig.LockPeriod, null, cancellationToken))
@@ -285,36 +317,51 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
         }
 
         [Theory]
-        [InlineData(null, "Microsoft.Azure.WebJobs.Host.UnitTests.Singleton.SingletonManagerTests.TestJob")]
-        [InlineData("", "Microsoft.Azure.WebJobs.Host.UnitTests.Singleton.SingletonManagerTests.TestJob")]
-        [InlineData("testscope", "Microsoft.Azure.WebJobs.Host.UnitTests.Singleton.SingletonManagerTests.TestJob.testscope")]
-        public void FormatLockId_ReturnsExpectedValue(string scope, string expectedLockId)
+        [InlineData(SingletonScope.Function, null, "TestHostId/Microsoft.Azure.WebJobs.Host.UnitTests.Singleton.SingletonManagerTests.TestJob")]
+        [InlineData(SingletonScope.Function, "", "TestHostId/Microsoft.Azure.WebJobs.Host.UnitTests.Singleton.SingletonManagerTests.TestJob")]
+        [InlineData(SingletonScope.Function, "testscope", "TestHostId/Microsoft.Azure.WebJobs.Host.UnitTests.Singleton.SingletonManagerTests.TestJob.testscope")]
+        [InlineData(SingletonScope.Host, "testscope", "TestHostId/testscope")]
+        public void FormatLockId_ReturnsExpectedValue(SingletonScope scope, string scopeId, string expectedLockId)
         {
             MethodInfo methodInfo = this.GetType().GetMethod("TestJob", BindingFlags.Static | BindingFlags.NonPublic);
-            string actualLockId = SingletonManager.FormatLockId(methodInfo, scope);
+            string actualLockId = SingletonManager.FormatLockId(methodInfo, scope, "TestHostId", scopeId);
             Assert.Equal(expectedLockId, actualLockId);
         }
 
         [Fact]
-        public void GetBoundScope_Success_ReturnsExceptedResult()
+        public void HostId_InvokesHostIdProvider_AndCachesResult()
+        {
+            Mock<IHostIdProvider> mockHostIdProvider = new Mock<IHostIdProvider>(MockBehavior.Strict);
+            mockHostIdProvider.Setup(p => p.GetHostIdAsync(CancellationToken.None)).ReturnsAsync(TestHostId);
+            SingletonManager singletonManager = new SingletonManager(null, null, null, null, mockHostIdProvider.Object);
+
+            Assert.Equal(TestHostId, singletonManager.HostId);
+            Assert.Equal(TestHostId, singletonManager.HostId);
+            Assert.Equal(TestHostId, singletonManager.HostId);
+
+            mockHostIdProvider.Verify(p => p.GetHostIdAsync(It.IsAny<CancellationToken>()), Times.Once);
+        }
+
+        [Fact]
+        public void GetBoundScopeId_Success_ReturnsExceptedResult()
         {
             Dictionary<string, object> bindingData = new Dictionary<string, object>();
             bindingData.Add("Region", "testregion");
             bindingData.Add("Zone", 1);
 
-            string result = _singletonManager.GetBoundScope(@"{Region}\{Zone}", bindingData);
+            string result = _singletonManager.GetBoundScopeId(@"{Region}\{Zone}", bindingData);
 
             Assert.Equal(@"testregion\1", result);
         }
 
         [Fact]
-        public void GetBoundScope_BindingError_Throws()
+        public void GetBoundScopeId_BindingError_Throws()
         {
             // Missing binding data for "Zone"
             Dictionary<string, object> bindingData = new Dictionary<string, object>();
             bindingData.Add("Region", "testregion");
 
-            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() => _singletonManager.GetBoundScope(@"{Region}\{Zone}", bindingData));
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() => _singletonManager.GetBoundScopeId(@"{Region}\{Zone}", bindingData));
 
             Assert.Equal("No value for named parameter 'Zone'.", exception.Message);
         }
@@ -322,9 +369,9 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
         [Theory]
         [InlineData("", "")]
         [InlineData("scope", "scope")]
-        public void GetBoundScope_NullBindingDataScenarios_Succeeds(string scope, string expectedResult)
+        public void GetBoundScopeId_NullBindingDataScenarios_Succeeds(string scope, string expectedResult)
         {
-            string result = _singletonManager.GetBoundScope(scope, null);
+            string result = _singletonManager.GetBoundScopeId(scope, null);
             Assert.Equal(expectedResult, result);
         }
 
@@ -335,7 +382,7 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
         [InlineData("scope:{P1}-{P2}", "scope:Test1-Test2")]
         [InlineData("%var1%", "Value1")]
         [InlineData("{P1}%var2%{P2}%var1%", "Test1Value2Test2Value1")]
-        public void GetBoundScope_BindingDataScenarios_Succeeds(string scope, string expectedResult)
+        public void GetBoundScopeId_BindingDataScenarios_Succeeds(string scope, string expectedResult)
         {
             Dictionary<string, object> bindingData = new Dictionary<string, object>();
             bindingData.Add("P1", "Test1");
@@ -344,7 +391,7 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
             _nameResolver.Names.Add("var1", "Value1");
             _nameResolver.Names.Add("var2", "Value2");
 
-            string result = _singletonManager.GetBoundScope(scope, bindingData);
+            string result = _singletonManager.GetBoundScopeId(scope, bindingData);
             Assert.Equal(expectedResult, result);
         }
 
@@ -390,7 +437,7 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
             MethodInfo method = this.GetType().GetMethod("TestJob_ListenerSingleton", BindingFlags.Static | BindingFlags.NonPublic);
 
             SingletonAttribute attribute = SingletonManager.GetListenerSingletonOrNull(typeof(TestListener), method);
-            Assert.Equal("Function", attribute.Scope);
+            Assert.Equal("Function", attribute.ScopeId);
         }
 
         [Fact]
@@ -399,9 +446,35 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Singleton
             MethodInfo method = this.GetType().GetMethod("TestJob", BindingFlags.Static | BindingFlags.NonPublic);
 
             SingletonAttribute attribute = SingletonManager.GetListenerSingletonOrNull(typeof(TestListener), method);
-            Assert.Equal("Listener", attribute.Scope);
+            Assert.Equal("Listener", attribute.ScopeId);
         }
 
+        [Theory]
+        [InlineData(SingletonMode.Function)]
+        [InlineData(SingletonMode.Listener)]
+        public void ValidateSingletonAttribute_ScopeIsHost_ScopeIdEmpty_Throws(SingletonMode mode)
+        {
+            SingletonAttribute attribute = new SingletonAttribute(null, SingletonScope.Host);
+
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+            {
+                SingletonManager.ValidateSingletonAttribute(attribute, mode);
+            });
+            Assert.Equal("A ScopeId value must be provided when using scope 'Host'.", exception.Message);
+        }
+
+        [Fact]
+        public void ValidateSingletonAttribute_ScopeIsHost_ModeIsListener_Throws()
+        {
+            SingletonAttribute attribute = new SingletonAttribute("TestScope", SingletonScope.Host);
+
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+            {
+                SingletonManager.ValidateSingletonAttribute(attribute, SingletonMode.Listener);
+            });
+            Assert.Equal("Scope 'Host' cannot be used when the mode is set to 'Listener'.", exception.Message);
+
+        }
         [Fact]
         public void GetLockPeriod_ReturnsExpectedValue()
         {

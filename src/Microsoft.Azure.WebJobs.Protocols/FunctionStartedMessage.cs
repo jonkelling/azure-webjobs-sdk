@@ -21,6 +21,13 @@ namespace Microsoft.Azure.WebJobs.Host.Protocols
         /// <summary>The name of the key used to store the function instance ID in metadata.</summary>
         protected const string FunctionInstanceIdKey = "FunctionInstanceId";
 
+        /// <summary>
+        /// Constructs a new instance.
+        /// </summary>
+        public FunctionStartedMessage()
+        {
+        }
+
         /// <summary>Gets or sets the function instance ID.</summary>
         public Guid FunctionInstanceId { get; set; }
 

@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project ToolsVersion="14.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="..\..\packages\xunit.runner.visualstudio.2.0.1\build\net20\xunit.runner.visualstudio.props" Condition="Exists('..\..\packages\xunit.runner.visualstudio.2.0.1\build\net20\xunit.runner.visualstudio.props')" />
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -152,6 +152,9 @@
     </Compile>
     <Compile Include="..\Microsoft.Azure.WebJobs.Protocols\FunctionStartedMessageExtensions.cs">
       <Link>Protocols\FunctionStartedMessageExtensions.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.Azure.WebJobs.Protocols\FunctionStatusMessage.cs">
+      <Link>Protocols\FunctionStatusMessage.cs</Link>
     </Compile>
     <Compile Include="..\Microsoft.Azure.WebJobs.Protocols\HeartbeatCommand.cs">
       <Link>Protocols\HeartbeatCommand.cs</Link>
@@ -364,15 +367,36 @@
     <Compile Include="Blobs\Bindings\CloudBlobContainerArgumentBindingProvider.cs" />
     <Compile Include="Blobs\Bindings\CloudBlobDirectoryArgumentBindingProvider.cs" />
     <Compile Include="Blobs\Bindings\CloudBlobEnumerableArgumentBindingProvider.cs" />
+    <Compile Include="Blobs\Bindings\OutByteArrayArgumentBindingProvider.cs" />
     <Compile Include="Blobs\BlobContainerOutputConverter.cs" />
+    <Compile Include="Blobs\ByteArrayArgumentBindingProvider.cs" />
     <Compile Include="Blobs\CompositeBlobContainerArgumentBindingProvider.cs" />
     <Compile Include="Blobs\IBlobContainerArgumentBindingProvider.cs" />
     <Compile Include="Blobs\Listeners\BlobQueueRegistration.cs" />
+    <Compile Include="Blobs\Listeners\ContainerScanInfo.cs" />
+    <Compile Include="Blobs\Listeners\ScanBlobScanLogHybridPollingStrategy.cs" />
+    <Compile Include="Bindings\AsyncCollector\AsyncCollectorBinding.cs" />
+    <Compile Include="Triggers\StrategyTriggerBinding.cs" />
+    <Compile Include="Bindings\ConstantValueProvider.cs" />
+    <Compile Include="Bindings\ConverterManager.cs" />
+    <Compile Include="Bindings\BindingFactory.cs" />
+    <Compile Include="IConverterManager.cs" />
+    <Compile Include="Triggers\ITriggerBindingStrategy.cs" />
+    <Compile Include="Bindings\AsyncCollector\AsyncCollectorValueProvider.cs" />
+    <Compile Include="Bindings\AsyncCollector\OutArrayValueProvider.cs" />
+    <Compile Include="Bindings\AsyncCollector\OutValueProvider.cs" />
+    <Compile Include="Bindings\AsyncCollector\SyncAsyncCollectorAdapter.cs" />
+    <Compile Include="Triggers\TriggerArgumentBinding\ArraryTriggerArgumentBinding.cs" />
+    <Compile Include="Triggers\TriggerArgumentBinding\PocoTriggerArgumentBinding.cs" />
+    <Compile Include="Triggers\TriggerArgumentBinding\SimpleTriggerArgumentBinding.cs" />
+    <Compile Include="Triggers\TriggerArgumentBinding\StringTriggerArgumentBinding.cs" />
+    <Compile Include="Bindings\AsyncCollector\TypedAsyncCollectorAdapter.cs" />
     <Compile Include="CompositeTraceWriter.cs" />
     <Compile Include="ConfigurationUtility.cs" />
     <Compile Include="Config\ExtensionConfigContext.cs" />
     <Compile Include="Config\IExtensionConfigProvider.cs" />
     <Compile Include="ConsoleTraceWriter.cs" />
+    <Compile Include="Constants.cs" />
     <Compile Include="ContextAccessor.cs" />
     <Compile Include="Bindings\Data\TToStringArgumentBindingProvider.cs" />
     <Compile Include="Bindings\IBindingDataProvider.cs" />
@@ -469,6 +493,8 @@
     <Compile Include="Listeners\CompositeListenerFactory.cs" />
     <Compile Include="Listeners\ISharedContextProvider.cs" />
     <Compile Include="Listeners\ListenerFactoryContext.cs" />
+    <Compile Include="Loggers\FunctionInstanceLogEntry.cs" />
+    <Compile Include="Loggers\FastTableLoggerProvider.cs" />
     <Compile Include="Loggers\DefaultConsoleProvider.cs" />
     <Compile Include="Loggers\DefaultLoggerProvider.cs" />
     <Compile Include="Loggers\IFunctionOutputLoggerProvider.cs" />

@@ -50,12 +50,8 @@ namespace Microsoft.Azure.WebJobs.ServiceBus
         /// <param name="entityPath">The ServiceBus entity to create a <see cref="MessagingFactory"/> for.</param>
         /// <param name="connectionStringName">Optional connection string name indicating the connection string to use.
         /// If null, the default connection string on the <see cref="ServiceBusConfiguration"/> will be used.</param>
-        /// <remarks>
-        /// This method is async because many of the interesting <see cref="MessagingFactory"/>
-        /// create methods that overrides might want to call are async.
-        /// </remarks>
-        /// <returns>A Task that returns the <see cref="MessagingFactory"/>.</returns>
-        public virtual Task<MessagingFactory> CreateMessagingFactoryAsync(string entityPath, string connectionStringName = null)
+        /// <returns>A <see cref="MessagingFactory"/>.</returns>
+        public virtual MessagingFactory CreateMessagingFactory(string entityPath, string connectionStringName = null)
         {
             if (string.IsNullOrEmpty(entityPath))
             {
@@ -64,7 +60,7 @@ namespace Microsoft.Azure.WebJobs.ServiceBus
 
             string connectionString = GetConnectionString(connectionStringName);
 
-            return Task.FromResult(MessagingFactory.CreateFromConnectionString(connectionString));
+            return MessagingFactory.CreateFromConnectionString(connectionString);
         }
 
         /// <summary>
@@ -79,6 +75,31 @@ namespace Microsoft.Azure.WebJobs.ServiceBus
                 throw new ArgumentNullException("entityPath");
             }
             return new MessageProcessor(_config.MessageOptions);
+        }
+
+        /// <summary>
+        /// Creates a <see cref="MessageReceiver"/> for the specified ServiceBus entity.
+        /// </summary>
+        /// <remarks>
+        /// You can override this method to customize the <see cref="MessageReceiver"/>.
+        /// </remarks>
+        /// <param name="factory">The <see cref="MessagingFactory"/> to use.</param>
+        /// <param name="entityPath">The ServiceBus entity to create a <see cref="MessageReceiver"/> for.</param>
+        /// <returns></returns>
+        public virtual MessageReceiver CreateMessageReceiver(MessagingFactory factory, string entityPath)
+        {
+            if (factory == null)
+            {
+                throw new ArgumentNullException("factory");
+            }
+            if (string.IsNullOrEmpty(entityPath))
+            {
+                throw new ArgumentNullException("entityPath");
+            }
+
+            MessageReceiver receiver = factory.CreateMessageReceiver(entityPath);
+            receiver.PrefetchCount = _config.PrefetchCount;
+            return receiver;
         }
 
         /// <summary>

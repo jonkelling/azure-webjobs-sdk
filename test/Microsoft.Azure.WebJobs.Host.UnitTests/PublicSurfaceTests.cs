@@ -22,8 +22,9 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests
             // The DLL containing the binding attributes should be truly minimal and have no extra dependencies. 
             var names = GetAssemblyReferences(typeof(QueueTriggerAttribute).Assembly);
 
-            Assert.Equal(1, names.Count);
+            Assert.Equal(2, names.Count);
             Assert.Equal("mscorlib", names[0]);
+            Assert.Equal("System", names[1]);
         }
 
         [Fact]
@@ -61,9 +62,11 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests
                 "TableAttribute",
                 "SingletonAttribute",
                 "SingletonMode",
+                "SingletonScope",
                 "StorageAccountAttribute",
                 "DisableAttribute",
-                "TimeoutAttribute"
+                "TimeoutAttribute",
+                "TraceLevelAttribute"
             };
 
             AssertPublicTypes(expected, assembly);
@@ -76,6 +79,10 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests
 
             var expected = new[]
             {
+                "FunctionInstanceLogEntry",
+                "IConverterManager",
+                "BindingFactory",
+                "ITriggerBindingStrategy`2",
                 "ConnectionStringNames",
                 "JobHost",
                 "JobHostConfiguration",
@@ -131,7 +138,8 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests
                 "IBindingDataProvider",
                 "FunctionInvocationException",
                 "TraceEvent",
-                "BindingTemplateExtensions"
+                "BindingTemplateExtensions",
+                "FunctionIndexingException"
             };
 
             AssertPublicTypes(expected, assembly);

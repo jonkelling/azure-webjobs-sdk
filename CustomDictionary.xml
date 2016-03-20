@@ -69,7 +69,10 @@
       <Word>MessagingProvider</Word>
       <Word>CloudBlobContainer</Word>
       <Word>SingletonAttribute</Word>
-	  </Recognized>
+      <Word>Prefetch</Word>
+      <Word>ScopeId</Word>
+      <Word>poco</Word>
+	</Recognized>
     <Deprecated/>
     <Compound>
       <Term CompoundAlternate="CancellationToken">cancellationToken</Term>
@@ -78,6 +81,7 @@
       <Term CompoundAlternate="ETag">eTag</Term>
     </Compound>
     <DiscreteExceptions>
+      <Term>Poco</Term>
 		<Term>WebJobs</Term>
 		<Term>ServiceBus</Term>
 		<Term>PartitionKey</Term>
@@ -86,6 +90,7 @@
 		<Term>ConnectionString</Term>
 		<Term>MessagingProvider</Term>
 		<Term>SingletonAttribute</Term>
+		<Term>ScopeId</Term>
     </DiscreteExceptions>
   </Words>
   <Acronyms>

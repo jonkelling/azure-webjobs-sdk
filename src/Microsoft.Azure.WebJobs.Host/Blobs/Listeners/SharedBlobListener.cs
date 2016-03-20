@@ -93,7 +93,7 @@ namespace Microsoft.Azure.WebJobs.Host.Blobs.Listeners
         {
             if (!StorageClient.IsDevelopmentStorageAccount(account))
             {
-                return new PollLogsStrategy();
+                return new ScanBlobScanLogHybridPollingStrategy();
             }
             else
             {

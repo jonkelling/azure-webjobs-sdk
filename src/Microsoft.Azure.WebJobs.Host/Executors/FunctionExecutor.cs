@@ -3,8 +3,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
@@ -25,11 +27,13 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
         private readonly IBackgroundExceptionDispatcher _backgroundExceptionDispatcher;
         private readonly TimeSpan? _functionTimeout;
         private readonly TraceWriter _trace;
+        private readonly IAsyncCollector<FunctionInstanceLogEntry> _fastLogger;
 
         private HostOutputMessage _hostOutputMessage;
 
         public FunctionExecutor(IFunctionInstanceLogger functionInstanceLogger, IFunctionOutputLogger functionOutputLogger, 
-            IBackgroundExceptionDispatcher backgroundExceptionDispatcher, TraceWriter trace, TimeSpan? functionTimeout)
+            IBackgroundExceptionDispatcher backgroundExceptionDispatcher, TraceWriter trace, TimeSpan? functionTimeout,
+            IAsyncCollector<FunctionInstanceLogEntry> fastLogger = null)
         {
             if (functionInstanceLogger == null)
             {
@@ -56,6 +60,7 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             _backgroundExceptionDispatcher = backgroundExceptionDispatcher;
             _trace = trace;
             _functionTimeout = functionTimeout;
+            _fastLogger = fastLogger;
         }
 
         public HostOutputMessage HostOutputMessage
@@ -64,28 +69,42 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             set { _hostOutputMessage = value; }
         }
 
-        public async Task<IDelayedException> TryExecuteAsync(IFunctionInstance instance, CancellationToken cancellationToken)
+        public async Task<IDelayedException> TryExecuteAsync(IFunctionInstance functionInstance, CancellationToken cancellationToken)
         {
-            FunctionStartedMessage startedMessage = CreateStartedMessageWithoutArguments(instance);
+            FunctionStartedMessage functionStartedMessage = CreateStartedMessageWithoutArguments(functionInstance);
             IDictionary<string, ParameterLog> parameterLogCollector = new Dictionary<string, ParameterLog>();
-            FunctionCompletedMessage completedMessage = null;
-
+            FunctionCompletedMessage functionCompletedMessage = null;
             ExceptionDispatchInfo exceptionInfo = null;
+            string functionStartedMessageId = null;
+            TraceLevel functionTraceLevel = GetFunctionTraceLevel(functionInstance);
 
-            string startedMessageId = null;
+            FunctionInstanceLogEntry fastItem = new FunctionInstanceLogEntry
+            {
+                FunctionInstanceId = functionStartedMessage.FunctionInstanceId,
+                ParentId = functionStartedMessage.ParentId,
+                FunctionName = functionStartedMessage.Function.ShortName,
+                TriggerReason = functionStartedMessage.ReasonDetails,
+                StartTime = functionStartedMessage.StartTime.DateTime
+            };
+            if (_fastLogger != null)
+            {
+                // Log started
+                await _fastLogger.AddAsync(fastItem);
+            }
+
             try
             {
-                startedMessageId = await ExecuteWithLogMessageAsync(instance, startedMessage, parameterLogCollector, cancellationToken);
-                completedMessage = CreateCompletedMessage(startedMessage);
+                functionStartedMessageId = await ExecuteWithLoggingAsync(functionInstance, functionStartedMessage, fastItem, parameterLogCollector, functionTraceLevel, cancellationToken);
+                functionCompletedMessage = CreateCompletedMessage(functionStartedMessage);
             }
             catch (Exception exception)
             {
-                if (completedMessage == null)
+                if (functionCompletedMessage == null)
                 {
-                    completedMessage = CreateCompletedMessage(startedMessage);
+                    functionCompletedMessage = CreateCompletedMessage(functionStartedMessage);
                 }
 
-                completedMessage.Failure = new FunctionFailure
+                functionCompletedMessage.Failure = new FunctionFailure
                 {
                     Exception = exception,
                     ExceptionType = exception.GetType().FullName,
@@ -95,13 +114,14 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
                 exceptionInfo = ExceptionDispatchInfo.Capture(exception);
             }
 
-            completedMessage.ParameterLogs = parameterLogCollector;
-            completedMessage.EndTime = DateTimeOffset.UtcNow;
+            if (functionCompletedMessage != null)
+            {
+                functionCompletedMessage.ParameterLogs = parameterLogCollector;
+                functionCompletedMessage.EndTime = DateTimeOffset.UtcNow;
+            }
 
-            bool loggedStartedEvent = startedMessageId != null;
-
+            bool loggedStartedEvent = functionStartedMessageId != null;
             CancellationToken logCompletedCancellationToken;
-
             if (loggedStartedEvent)
             {
                 // If function started was logged, don't cancel calls to log function completed.
@@ -111,91 +131,169 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             {
                 logCompletedCancellationToken = cancellationToken;
             }
+                        
+            if (_fastLogger != null)
+            {
+                // Log completed                
+                fastItem.EndTime = DateTime.UtcNow;
+                fastItem.Arguments = functionCompletedMessage.Arguments;
+                
+                if (functionCompletedMessage != null && functionCompletedMessage.Failure != null)
+                {
+                    fastItem.ErrorDetails = functionCompletedMessage.Failure.ExceptionDetails;
+                }
+                await _fastLogger.AddAsync(fastItem);
+            }
 
-            await _functionInstanceLogger.LogFunctionCompletedAsync(completedMessage, logCompletedCancellationToken);
+            if (functionCompletedMessage != null &&
+                ((functionTraceLevel >= TraceLevel.Info) || (functionCompletedMessage.Failure != null && functionTraceLevel >= TraceLevel.Error)))
+            {
+                await _functionInstanceLogger.LogFunctionCompletedAsync(functionCompletedMessage, logCompletedCancellationToken);
+            }
 
             if (loggedStartedEvent)
             {
-                await _functionInstanceLogger.DeleteLogFunctionStartedAsync(startedMessageId, cancellationToken);
+                await _functionInstanceLogger.DeleteLogFunctionStartedAsync(functionStartedMessageId, cancellationToken);
             }
 
             return exceptionInfo != null ? new ExceptionDispatchInfoDelayedException(exceptionInfo) : null;
         }
 
-        private async Task<string> ExecuteWithLogMessageAsync(IFunctionInstance instance, FunctionStartedMessage message, 
-            IDictionary<string, ParameterLog> parameterLogCollector, CancellationToken cancellationToken)
+        internal static TraceLevel GetFunctionTraceLevel(IFunctionInstance functionInstance)
         {
-            string startedMessageId;
+            TraceLevel functionTraceLevel = TraceLevel.Verbose;
 
-            // Create the console output writer
-            IFunctionOutputDefinition outputDefinition = await _functionOutputLogger.CreateAsync(instance, cancellationToken);
-
-            // Create a linked token source that will allow us to signal function cancellation
-            // (e.g. Based on TimeoutAttribute, etc.)
-            CancellationTokenSource functionCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
-            using (IFunctionOutput outputLog = await outputDefinition.CreateOutputAsync(cancellationToken))
-            using (ITaskSeriesTimer updateOutputLogTimer = StartOutputTimer(outputLog.UpdateCommand, _backgroundExceptionDispatcher))
-            using (functionCancellationTokenSource)
+            // Determine the TraceLevel for this function (affecting both Console as well as Dashboard logging)
+            TraceLevelAttribute attribute = TypeUtility.GetHierarchicalAttributeOrNull<TraceLevelAttribute>(functionInstance.FunctionDescriptor.Method);
+            if (attribute != null)
             {
-                // We create a new composite trace writer that will also forward
-                // output to the function output log (in addition to console, user TraceWriter, etc.).
-                TraceWriter traceWriter = new CompositeTraceWriter(_trace, outputLog.Output);
+                functionTraceLevel = attribute.Level;
+            }
 
-                FunctionBindingContext functionContext = new FunctionBindingContext(instance.Id, functionCancellationTokenSource.Token, traceWriter);
+            return functionTraceLevel;
+        }
 
-                // Must bind before logging (bound invoke string is included in log message).             
-                IReadOnlyDictionary<string, IValueProvider> parameters =
-                    await instance.BindingSource.BindAsync(new ValueBindingContext(functionContext, cancellationToken));
+        private async Task<string> ExecuteWithLoggingAsync(IFunctionInstance instance, FunctionStartedMessage message,
+            FunctionInstanceLogEntry fastItem,
+            IDictionary<string, ParameterLog> parameterLogCollector, TraceLevel functionTraceLevel, CancellationToken cancellationToken)
+        {
+            IFunctionOutputDefinition outputDefinition = null;
+            IFunctionOutput outputLog = null;
+            ITaskSeriesTimer updateOutputLogTimer = null;
+            TextWriter functionOutputTextWriter = null;
 
-                ExceptionDispatchInfo exceptionInfo;
-                using (ValueProviderDisposable.Create(parameters))
+            Func<Task> initializeOutputAsync = async () =>
+            {
+                outputDefinition = await _functionOutputLogger.CreateAsync(instance, cancellationToken);
+                outputLog = outputDefinition.CreateOutput();
+                functionOutputTextWriter = outputLog.Output;
+                updateOutputLogTimer = StartOutputTimer(outputLog.UpdateCommand, _backgroundExceptionDispatcher);
+            };
+
+            if (functionTraceLevel >= TraceLevel.Info)
+            {
+                await initializeOutputAsync();
+            }
+
+            try
+            {
+                // Create a linked token source that will allow us to signal function cancellation
+                // (e.g. Based on TimeoutAttribute, etc.)
+                CancellationTokenSource functionCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using (functionCancellationTokenSource)
                 {
-                    startedMessageId = await LogFunctionStartedAsync(message, outputDefinition, parameters, cancellationToken);
+                    // We create a new composite trace writer that will also forward
+                    // output to the function output log (in addition to console, user TraceWriter, etc.).
+                    TraceWriter traceWriter = new CompositeTraceWriter(_trace, functionOutputTextWriter, functionTraceLevel);
 
-                    try
+                    // Must bind before logging (bound invoke string is included in log message).
+                    FunctionBindingContext functionContext = new FunctionBindingContext(instance.Id, functionCancellationTokenSource.Token, traceWriter);
+                    var valueBindingContext = new ValueBindingContext(functionContext, cancellationToken);
+                    var parameters = await instance.BindingSource.BindAsync(valueBindingContext);
+
+                    Exception invocationException = null;
+                    ExceptionDispatchInfo exceptionInfo = null;
+                    string startedMessageId = null;
+                    using (ValueProviderDisposable.Create(parameters))
                     {
-                        await ExecuteWithOutputLogsAsync(instance, parameters, traceWriter, outputDefinition, parameterLogCollector, functionCancellationTokenSource);
-                        exceptionInfo = null;
+                        if (functionTraceLevel >= TraceLevel.Info)
+                        {
+                            startedMessageId = await LogFunctionStartedAsync(message, outputDefinition, parameters, cancellationToken);
+                        }
+
+                        try
+                        {
+                            await ExecuteWithLoggingAsync(instance, parameters, traceWriter, outputDefinition, parameterLogCollector, functionTraceLevel, functionCancellationTokenSource);
+                        }
+                        catch (Exception ex)
+                        {
+                            invocationException = ex;
+                        }
                     }
-                    catch (OperationCanceledException exception)
+
+                    if (invocationException != null)
                     {
-                        exceptionInfo = ExceptionDispatchInfo.Capture(exception);
+                        if (outputDefinition == null)
+                        {
+                            // In error cases, even if logging is disabled for this function, we want to force
+                            // log errors. So we must delay initialize logging here
+                            await initializeOutputAsync();
+                            startedMessageId = await LogFunctionStartedAsync(message, outputDefinition, parameters, cancellationToken);
+                        }
+
+                        if (invocationException is OperationCanceledException)
+                        {
+                            exceptionInfo = ExceptionDispatchInfo.Capture(invocationException);
+                        }
+                        else
+                        {
+                            string errorMessage = string.Format("Exception while executing function: {0}", instance.FunctionDescriptor.ShortName);
+                            FunctionInvocationException fex = new FunctionInvocationException(errorMessage, instance.Id, instance.FunctionDescriptor.FullName, invocationException);
+                            traceWriter.Error(errorMessage, fex, TraceSource.Execution);
+                            exceptionInfo = ExceptionDispatchInfo.Capture(fex);
+                        }
                     }
-                    catch (Exception exception)
+
+                    if (exceptionInfo == null && updateOutputLogTimer != null)
                     {
-                        string errorMessage = string.Format("Exception while executing function: {0}", instance.FunctionDescriptor.ShortName);
-                        FunctionInvocationException functionException = new FunctionInvocationException(errorMessage, instance.Id, instance.FunctionDescriptor.FullName, exception);
-                        traceWriter.Error(errorMessage, functionException, TraceSource.Execution);
-                        exceptionInfo = ExceptionDispatchInfo.Capture(functionException);
+                        await updateOutputLogTimer.StopAsync(cancellationToken);
                     }
+
+                    // after all execution is complete, flush the TraceWriter
+                    traceWriter.Flush();
+
+                    // We save the exception info above rather than throwing to ensure we always write
+                    // console output even if the function fails or was canceled.
+                    if (outputLog != null)
+                    {
+                        await outputLog.SaveAndCloseAsync(fastItem, cancellationToken);
+                    }
+
+                    if (exceptionInfo != null)
+                    {
+                        // release any held singleton lock immediately
+                        SingletonLock singleton = null;
+                        if (TryGetSingletonLock(parameters, out singleton) && singleton.IsHeld)
+                        {
+                            await singleton.ReleaseAsync(cancellationToken);
+                        }
+
+                        exceptionInfo.Throw();
+                    }
+
+                    return startedMessageId;
                 }
-
-                if (exceptionInfo == null && updateOutputLogTimer != null)
+            }
+            finally
+            {
+                if (outputLog != null)
                 {
-                    await updateOutputLogTimer.StopAsync(cancellationToken);
+                    ((IDisposable)outputLog).Dispose();
                 }
-
-                // after all execution is complete, flush the TraceWriter
-                traceWriter.Flush();
-
-                // We save the exception info rather than doing throw; above to ensure we always write console output,
-                // even if the function fails or was canceled.
-                await outputLog.SaveAndCloseAsync(cancellationToken);
-
-                if (exceptionInfo != null)
+                if (updateOutputLogTimer != null)
                 {
-                    // release any held singleton lock immediately
-                    SingletonLock singleton = null;
-                    if (TryGetSingletonLock(parameters, out singleton) && singleton.IsHeld)
-                    {
-                        await singleton.ReleaseAsync(cancellationToken);
-                    }
-
-                    exceptionInfo.Throw();
+                    ((IDisposable)updateOutputLogTimer).Dispose();
                 }
-
-                return startedMessageId;
             }
         }
 
@@ -308,48 +406,59 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             return timer;
         }
 
-        private async Task ExecuteWithOutputLogsAsync(IFunctionInstance instance,
+        private async Task ExecuteWithLoggingAsync(IFunctionInstance instance,
             IReadOnlyDictionary<string, IValueProvider> parameters,
             TraceWriter trace,
             IFunctionOutputDefinition outputDefinition,
             IDictionary<string, ParameterLog> parameterLogCollector,
+            TraceLevel functionTraceLevel,
             CancellationTokenSource functionCancellationTokenSource)
         {
             IFunctionInvoker invoker = instance.Invoker;
-            IReadOnlyDictionary<string, IWatcher> watches = CreateWatches(parameters);
-            IRecurrentCommand updateParameterLogCommand = outputDefinition.CreateParameterLogUpdateCommand(watches, trace);
 
-            using (ITaskSeriesTimer updateParameterLogTimer = StartParameterLogTimer(updateParameterLogCommand, _backgroundExceptionDispatcher))
+            IReadOnlyDictionary<string, IWatcher> parameterWatchers = null;
+            ITaskSeriesTimer updateParameterLogTimer = null;
+            if (functionTraceLevel >= TraceLevel.Info)
             {
-                try
-                {
-                    await ExecuteWithWatchersAsync(instance, parameters, _functionTimeout, trace, functionCancellationTokenSource);
+                parameterWatchers = CreateParameterWatchers(parameters);
+                IRecurrentCommand updateParameterLogCommand = outputDefinition.CreateParameterLogUpdateCommand(parameterWatchers, trace);
+                updateParameterLogTimer = StartParameterLogTimer(updateParameterLogCommand, _backgroundExceptionDispatcher);
+            }
+            
+            try
+            {
+                await ExecuteWithWatchersAsync(instance, parameters, _functionTimeout, trace, functionCancellationTokenSource);
                     
-                    if (updateParameterLogTimer != null)
-                    {
-                        // Stop the watches after calling IValueBinder.SetValue (it may do things that should show up in
-                        // the watches).
-                        // Also, IValueBinder.SetValue could also take a long time (flushing large caches), and so it's
-                        // useful to have watches still running.
-                        await updateParameterLogTimer.StopAsync(functionCancellationTokenSource.Token);
-                    }
-                }
-                finally
+                if (updateParameterLogTimer != null)
                 {
-                    ValueWatcher.AddLogs(watches, parameterLogCollector);
+                    // Stop the watches after calling IValueBinder.SetValue (it may do things that should show up in
+                    // the watches).
+                    // Also, IValueBinder.SetValue could also take a long time (flushing large caches), and so it's
+                    // useful to have watches still running.
+                    await updateParameterLogTimer.StopAsync(functionCancellationTokenSource.Token);
+                }
+            }
+            finally
+            {
+                if (updateParameterLogTimer != null)
+                {
+                    ((IDisposable)updateParameterLogTimer).Dispose();
+                }
+
+                if (parameterWatchers != null)
+                {
+                    ValueWatcher.AddLogs(parameterWatchers, parameterLogCollector);
                 }
             }
         }
 
-        private static IReadOnlyDictionary<string, IWatcher> CreateWatches(
-            IReadOnlyDictionary<string, IValueProvider> parameters)
+        private static IReadOnlyDictionary<string, IWatcher> CreateParameterWatchers(IReadOnlyDictionary<string, IValueProvider> parameters)
         {
             Dictionary<string, IWatcher> watches = new Dictionary<string, IWatcher>();
 
             foreach (KeyValuePair<string, IValueProvider> item in parameters)
             {
                 IWatchable watchable = item.Value as IWatchable;
-
                 if (watchable != null)
                 {
                     watches.Add(item.Key, watchable.Watcher);
@@ -400,7 +509,7 @@ namespace Microsoft.Azure.WebJobs.Host.Executors
             }
 
             // Process any out parameters and persist any pending values.
-            // Ensure IValueBinder.SetValue is called in BindOrder. This ordering is particularly important for
+            // Ensure IValueBinder.SetValue is called in BindStepOrder. This ordering is particularly important for
             // ensuring queue outputs occur last. That way, all other function side-effects are guaranteed to have
             // occurred by the time messages are enqueued.
             string[] parameterNamesInBindOrder = SortParameterNamesInStepOrder(parameters);

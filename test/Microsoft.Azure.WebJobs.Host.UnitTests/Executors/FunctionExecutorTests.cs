@@ -125,6 +125,22 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Executors
             Assert.Equal("Timeout value of 00:01:00 exceeded by function 'Functions.MethodLevel' (Id: 'b2d1dd72-80e2-412b-a22e-3b4558f378b4'). Initiating cancellation.", trace.Message);
         }
 
+        [Fact]
+        public void GetFunctionTraceLevel_ReturnsExpectedLevel()
+        {
+            _descriptor.Method = typeof(Functions).GetMethod("MethodLevel", BindingFlags.Static | BindingFlags.Public);
+            TraceLevel result = FunctionExecutor.GetFunctionTraceLevel(_mockFunctionInstance.Object);
+            Assert.Equal(TraceLevel.Verbose, result);
+
+            _descriptor.Method = typeof(Functions).GetMethod("TraceLevelOverride_Off", BindingFlags.Static | BindingFlags.Public);
+            result = FunctionExecutor.GetFunctionTraceLevel(_mockFunctionInstance.Object);
+            Assert.Equal(TraceLevel.Off, result);
+
+            _descriptor.Method = typeof(Functions).GetMethod("TraceLevelOverride_Error", BindingFlags.Static | BindingFlags.Public);
+            result = FunctionExecutor.GetFunctionTraceLevel(_mockFunctionInstance.Object);
+            Assert.Equal(TraceLevel.Error, result);
+        }
+
         public static void GlobalLevel(CancellationToken cancellationToken)
         {
         }
@@ -142,6 +158,16 @@ namespace Microsoft.Azure.WebJobs.Host.UnitTests.Executors
             }
 
             public static void NoCancellationTokenParameter()
+            {
+            }
+
+            [TraceLevel(TraceLevel.Off)]
+            public static void TraceLevelOverride_Off()
+            {
+            }
+
+            [TraceLevel(TraceLevel.Error)]
+            public static void TraceLevelOverride_Error()
             {
             }
         }

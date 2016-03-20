@@ -27,8 +27,9 @@ namespace Microsoft.Azure.WebJobs.Host.Indexers
         private readonly IFunctionExecutor _executor;
         private readonly HashSet<Assembly> _jobAttributeAssemblies;
         private readonly SingletonManager _singletonManager;
+        private readonly TraceWriter _trace;
 
-        public FunctionIndexer(ITriggerBindingProvider triggerBindingProvider, IBindingProvider bindingProvider, IJobActivator activator, IFunctionExecutor executor, IExtensionRegistry extensions, SingletonManager singletonManager)
+        public FunctionIndexer(ITriggerBindingProvider triggerBindingProvider, IBindingProvider bindingProvider, IJobActivator activator, IFunctionExecutor executor, IExtensionRegistry extensions, SingletonManager singletonManager, TraceWriter trace)
         {
             if (triggerBindingProvider == null)
             {
@@ -60,19 +61,45 @@ namespace Microsoft.Azure.WebJobs.Host.Indexers
                 throw new ArgumentNullException("singletonManager");
             }
 
+            if (trace == null)
+            {
+                throw new ArgumentNullException("trace");
+            }
+
             _triggerBindingProvider = triggerBindingProvider;
             _bindingProvider = bindingProvider;
             _activator = activator;
             _executor = executor;
             _singletonManager = singletonManager;
             _jobAttributeAssemblies = GetJobAttributeAssemblies(extensions);
+            _trace = trace;
         }
 
         public async Task IndexTypeAsync(Type type, IFunctionIndexCollector index, CancellationToken cancellationToken)
         {
             foreach (MethodInfo method in type.GetMethods(PublicMethodFlags).Where(IsJobMethod))
             {
-                await IndexMethodAsync(method, index, cancellationToken);
+                try
+                {
+                    await IndexMethodAsync(method, index, cancellationToken);
+                }
+                catch (FunctionIndexingException fex)
+                {
+                    // Route the indexing exception through the TraceWriter pipeline
+                    _trace.Error(fex.Message, fex);
+
+                    // If the error has been marked as handled, ignore the indexing exception
+                    // and continue on to the rest of the methods. In this case the method in
+                    // error simply won't be running in the JobHost.
+                    if (fex.Handled)
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
             }
         }
 
@@ -130,7 +157,7 @@ namespace Microsoft.Azure.WebJobs.Host.Indexers
             }
             catch (Exception exception)
             {
-                throw new FunctionIndexingException(method.Name, exception);
+                throw new FunctionIndexingException(method.GetShortName(), exception);
             }
         }
 
@@ -188,22 +215,22 @@ namespace Microsoft.Azure.WebJobs.Host.Indexers
                 {
                     if (triggerBinding != null && !hasNoAutomaticTriggerAttribute)
                     {
-                        throw new InvalidOperationException(string.Format("Cannot bind parameter '{0}' when using this trigger.", parameter.Name));
+                        throw new InvalidOperationException(
+                            string.Format(Constants.UnableToBindParameterFormat, 
+                            parameter.Name, parameter.ParameterType.Name, Constants.ExtensionInitializationMessage));
                     }
                     else
                     {
                         // Host.Call-only parameter
-                        string parameterName = parameter.Name;
-                        Type parameterType = parameter.ParameterType;
-
-                        binding = InvokeBinding.Create(parameterName, parameterType);
-
+                        binding = InvokeBinding.Create(parameter.Name, parameter.ParameterType);
                         if (binding == null && invalidInvokeBindingException == null)
                         {
                             // This function might not have any attribute, in which case we shouldn't throw an
                             // exception when we can't bind it. Instead, save this exception for later once we determine
                             // whether or not it is an SDK function.
-                            invalidInvokeBindingException = new InvalidOperationException(string.Format("Cannot bind parameter '{0}' to type {1}.", parameterName, parameterType.Name));
+                            invalidInvokeBindingException = new InvalidOperationException(
+                                string.Format(Constants.UnableToBindParameterFormat,
+                                parameter.Name, parameter.ParameterType.Name, Constants.ExtensionInitializationMessage));
                         }
                     }
                 }

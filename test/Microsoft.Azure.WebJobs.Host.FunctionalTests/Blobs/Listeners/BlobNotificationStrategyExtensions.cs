@@ -6,22 +6,23 @@ using System.Threading;
 using Microsoft.Azure.WebJobs.Host.Blobs.Listeners;
 using Microsoft.Azure.WebJobs.Host.Listeners;
 using Microsoft.Azure.WebJobs.Host.Storage.Blob;
+using Microsoft.Azure.WebJobs.Host.Timers;
 
 namespace Microsoft.Azure.WebJobs.Host.FunctionalTests.Blobs.Listeners
 {
     internal static class BlobNotificationStrategyExtensions
     {
-        public static void Execute(this IBlobNotificationStrategy strategy)
+        public static TaskSeriesCommandResult Execute(this IBlobListenerStrategy strategy)
         {
             if (strategy == null)
             {
                 throw new ArgumentNullException("strategy");
             }
 
-            strategy.ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
+            return strategy.ExecuteAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
 
-        public static void Register(this IBlobNotificationStrategy strategy, IStorageBlobContainer container,
+        public static void Register(this IBlobListenerStrategy strategy, IStorageBlobContainer container,
             ITriggerExecutor<IStorageBlob> triggerExecutor)
         {
             if (strategy == null)
@@ -30,6 +31,17 @@ namespace Microsoft.Azure.WebJobs.Host.FunctionalTests.Blobs.Listeners
             }
 
             strategy.RegisterAsync(container, triggerExecutor, CancellationToken.None).GetAwaiter().GetResult();
+        }
+
+        public static void Start(this IBlobListenerStrategy strategy, IStorageBlobContainer container,
+            ITriggerExecutor<IStorageBlob> triggerExecutor)
+        {
+            if (strategy == null)
+            {
+                throw new ArgumentNullException("strategy");
+            }
+
+            strategy.Start();
         }
     }
 }

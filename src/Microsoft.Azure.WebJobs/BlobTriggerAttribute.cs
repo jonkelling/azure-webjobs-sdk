@@ -8,7 +8,7 @@ using System.IO;
 namespace Microsoft.Azure.WebJobs
 {
     /// <summary>
-    /// Represents an attribute that binds a parameter to an Azure Blob, causing the method to run when a blob is
+    /// Attribute used to bind a parameter to an Azure Blob, causing the method to run when a blob is
     /// uploaded.
     /// </summary>
     /// <remarks>
@@ -20,6 +20,7 @@ namespace Microsoft.Azure.WebJobs
     /// <item><description><see cref="Stream"/></description></item>
     /// <item><description><see cref="TextReader"/></description></item>
     /// <item><description><see cref="string"/></description></item>
+    /// <item><description><see cref="T:byte[]"/></description></item>
     /// <item><description>A custom type implementing <see cref="ICloudBlobStreamBinder{T}"/></description></item>
     /// </list>
     /// </remarks>
