@@ -121,7 +121,7 @@ namespace Microsoft.Azure.WebJobs.Host
         /// <param name="type">The type to return <see cref="PropertyHelper"/>s for.</param>
         /// <param name="getExtendedPropertyHelpers"></param>
         /// <returns>A collection of <see cref="PropertyHelper"/>s.</returns>
-        public static PropertyHelper[] GetProperties(Type type, bool getExtendedPropertyHelpers = true)
+        public static PropertyHelper[] GetProperties(Type type, int getExtendedPropertyHelpers = 2)
         {
             return GetProperties(type, CreateInstance, _reflectionCache, getExtendedPropertyHelpers);
         }
@@ -227,7 +227,7 @@ namespace Microsoft.Azure.WebJobs.Host
         private static PropertyHelper[] GetProperties(Type type,
                                                         Func<PropertyInfo, PropertyHelper> createPropertyHelper,
                                                         ConcurrentDictionary<Type, PropertyHelper[]> cache,
-                                                        bool getExtendedPropertyHelpers)
+                                                        int getExtendedPropertyHelpers)
         {
             // Using an array rather than IEnumerable, as this will be called on the hot path numerous times.
             PropertyHelper[] helpers;
@@ -248,9 +248,9 @@ namespace Microsoft.Azure.WebJobs.Host
 
                     newHelpers.Add(propertyHelper);
 
-                    if (getExtendedPropertyHelpers)
+                    if (getExtendedPropertyHelpers > 0)
                     {
-                        var extendedPropertyHelpers = GetProperties(propertyHelper.PropertyType, false);
+                        var extendedPropertyHelpers = GetProperties(propertyHelper.PropertyType, getExtendedPropertyHelpers - 1);
 
                         newHelpers.AddRange(
                             from extendedPropertyHelper in extendedPropertyHelpers
